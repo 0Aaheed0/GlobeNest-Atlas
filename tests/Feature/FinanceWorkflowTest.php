@@ -6,6 +6,7 @@ use App\Models\StudentProfile;
 use App\Models\User;
 use App\Services\CurrencyCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Hash;
 use Tests\TestCase;
 
 class FinanceWorkflowTest extends TestCase
@@ -31,6 +32,9 @@ class FinanceWorkflowTest extends TestCase
         ])->assertRedirect(route('dashboard'));
 
         $this->assertAuthenticated();
+        $registeredUser = User::where('email', 'student@example.test')->firstOrFail();
+        $this->assertNotSame('very-secure-password', $registeredUser->password);
+        $this->assertTrue(Hash::check('very-secure-password', $registeredUser->password));
         $this->get(route('dashboard'))->assertOk()->assertSee('Welcome to your financial map.');
         $this->post(route('logout'))->assertRedirect(route('home'));
         $this->assertGuest();
@@ -39,6 +43,41 @@ class FinanceWorkflowTest extends TestCase
             'password' => 'very-secure-password',
         ])->assertRedirect(route('dashboard'));
         $this->assertAuthenticated();
+    }
+
+    public function test_invalid_login_is_rejected_and_repeated_attempts_are_rate_limited(): void
+    {
+        User::factory()->create([
+            'email' => 'rate-limit@example.test',
+            'password' => 'a-different-password',
+        ]);
+
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $this->post(route('login.store'), [
+                'email' => 'rate-limit@example.test',
+                'password' => 'wrong-password',
+            ])->assertSessionHasErrors('email');
+        }
+
+        $this->post(route('login.store'), [
+            'email' => 'rate-limit@example.test',
+            'password' => 'wrong-password',
+        ])->assertTooManyRequests();
+
+        $this->assertGuest();
+    }
+
+    public function test_first_time_dashboard_requires_currency_choice_and_displays_currency_names_in_help(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('HELP & FAQ')
+            ->assertSee('First-time guide')
+            ->assertSee('BDT — Bangladeshi taka')
+            ->assertSee('<option value="" selected disabled>Choose your home currency</option>', false)
+            ->assertSee('<option value="USD">USD — United States dollar</option>', false);
     }
 
     public function test_profile_requires_valid_supported_currency_and_stores_privacy_consent(): void
@@ -433,13 +472,46 @@ class FinanceWorkflowTest extends TestCase
             ->assertJsonPath('forecasts.0.name', 'Favorable')
             ->assertJsonPath('forecasts.1.rate_change_percent', 0)
             ->assertJsonPath('forecasts.2.rate_change_percent', 10)
-            ->assertJsonPath('forecast_assumptions.scholarship_is_unconfirmed', true);
+            ->assertJsonPath('forecast_assumptions.scholarship_is_unconfirmed', true)
+            ->assertJsonPath('budget_input_currency', 'USD');
 
         $this->actingAs($user)->postJson(route('scenario.run'), [
             ...$scenarioInputs,
             'saved_amount' => '1200.01',
         ])->assertUnprocessable()
             ->assertJsonPath('message', 'Saved progress cannot exceed the tuition amount.');
+    }
+
+    public function test_currency_conversion_shows_supported_bdt_estimate_source_and_calculation_time(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->postJson(route('currency.convert'), [
+            'amount' => '100.00',
+            'from_currency' => 'USD',
+            'to_currency' => 'BDT',
+        ])->assertOk()
+            ->assertJsonPath('converted_amount', '11920.00')
+            ->assertJsonPath('to_currency', 'BDT')
+            ->assertJsonPath('source', 'Atlas demonstration rate table; not a live market quote')
+            ->assertJsonPath('live', false)
+            ->assertJsonStructure(['retrieved_at']);
+    }
+
+    public function test_currency_conversion_rejects_invalid_amounts_and_guest_requests(): void
+    {
+        $this->postJson(route('currency.convert'), [
+            'amount' => '100.001',
+            'from_currency' => 'USD',
+            'to_currency' => 'EUR',
+        ])->assertUnauthorized();
+
+        $this->actingAs(User::factory()->create())->postJson(route('currency.convert'), [
+            'amount' => '100.001',
+            'from_currency' => 'USD',
+            'to_currency' => 'EUR',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('amount');
     }
 
     public function test_agent_confirmation_endpoint_accepts_only_an_owned_pending_change(): void

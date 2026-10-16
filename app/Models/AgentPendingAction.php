@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['user_id', 'conversation_id', 'tool_name', 'arguments', 'status', 'expires_at', 'confirmed_at'])]
+#[Fillable(['user_id', 'conversation_id', 'tool_name', 'arguments', 'before_state', 'status', 'expires_at', 'confirmed_at'])]
 class AgentPendingAction extends Model
 {
     use HasFactory;
@@ -16,6 +16,7 @@ class AgentPendingAction extends Model
     {
         return [
             'arguments' => 'array',
+            'before_state' => 'array',
             'expires_at' => 'datetime',
             'confirmed_at' => 'datetime',
         ];

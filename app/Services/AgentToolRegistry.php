@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Models\AgentAuditLog;
 use App\Models\AgentConversation;
 use App\Models\AgentPendingAction;
+use App\Models\SavingsGoal;
+use App\Models\TuitionPlan;
 use App\Models\User;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
@@ -29,36 +31,47 @@ class AgentToolRegistry
             $this->declaration('get_financial_summary', 'Read the signed-in user’s own financial profile and high-level totals.', []),
             $this->declaration('get_funding_opportunities', 'List this user’s own user-entered scholarship and funding opportunities. This tool does not search the web or verify eligibility.', []),
             $this->declaration('convert_currency', 'Calculate a deterministic conversion using the clearly labeled Atlas demonstration rate table.', [
-                'amount' => ['type' => 'STRING', 'description' => 'Positive amount, at most two decimal places.'],
+                'amount' => ['type' => 'string', 'description' => 'Positive amount, at most two decimal places.'],
                 'from_currency' => $this->currencyProperty(),
                 'to_currency' => $this->currencyProperty(),
             ], ['amount', 'from_currency', 'to_currency']),
             $this->declaration('analyze_spending', 'Summarize this user’s recorded expenses for a recent period.', [
-                'period_days' => ['type' => 'INTEGER', 'description' => 'Number of recent days to analyze, between 1 and 365.'],
+                'period_days' => ['type' => 'integer', 'description' => 'Number of recent days to analyze, between 1 and 365.'],
             ], ['period_days']),
             $this->declaration('plan_tuition', 'Calculate required weekly and monthly savings for one of this user’s tuition plans.', [
-                'tuition_plan_id' => ['type' => 'INTEGER', 'description' => 'ID of a tuition plan belonging to the signed-in user.'],
+                'tuition_plan_id' => ['type' => 'integer', 'description' => 'ID of a tuition plan belonging to the signed-in user.'],
+            ], ['tuition_plan_id']),
+            $this->declaration('update_savings_goal', 'Prepare a change to an existing savings target. The current currency is retained and the user must confirm the exact change.', [
+                'goal_id' => ['type' => 'integer', 'description' => 'ID of a savings goal belonging to the signed-in user.'],
+                'target_amount' => ['type' => 'string', 'description' => 'New positive target amount, in the goal’s existing currency, at most two decimals.'],
+            ], ['goal_id', 'target_amount']),
+            $this->declaration('update_tuition_plan', 'Prepare changes to an existing tuition plan. Its current currency is retained and the user must confirm the exact changes.', [
+                'tuition_plan_id' => ['type' => 'integer', 'description' => 'ID of a tuition plan belonging to the signed-in user.'],
+                'amount' => ['type' => 'string', 'description' => 'Optional new total tuition amount, at most two decimals.'],
+                'saved_amount' => ['type' => 'string', 'description' => 'Optional new recorded saved amount, at most two decimals.'],
+                'due_date' => ['type' => 'string', 'description' => 'Optional new due date in YYYY-MM-DD format.'],
+                'installments' => ['type' => 'integer', 'description' => 'Optional new installment count from 1 to 24.'],
             ], ['tuition_plan_id']),
             $this->declaration('compare_remittance', 'Compare three illustrative fee models; these are not provider quotes.', [
-                'amount' => ['type' => 'STRING', 'description' => 'Positive amount, at most two decimal places.'],
+                'amount' => ['type' => 'string', 'description' => 'Positive amount, at most two decimal places.'],
                 'from_currency' => $this->currencyProperty(),
                 'to_currency' => $this->currencyProperty(),
             ], ['amount', 'from_currency', 'to_currency']),
             $this->declaration('create_savings_goal', 'Prepare a savings goal for user review. It is not saved until explicitly confirmed.', [
-                'title' => ['type' => 'STRING', 'description' => 'Short goal name, max 120 characters.'],
-                'target_amount' => ['type' => 'STRING', 'description' => 'Positive target amount, at most two decimals.'],
-                'current_amount' => ['type' => 'STRING', 'description' => 'Optional amount already saved, at most two decimals.'],
+                'title' => ['type' => 'string', 'description' => 'Short goal name, max 120 characters.'],
+                'target_amount' => ['type' => 'string', 'description' => 'Positive target amount, at most two decimals.'],
+                'current_amount' => ['type' => 'string', 'description' => 'Optional amount already saved, at most two decimals.'],
                 'currency' => $this->currencyProperty(),
-                'target_date' => ['type' => 'STRING', 'description' => 'Optional target date in YYYY-MM-DD format.'],
+                'target_date' => ['type' => 'string', 'description' => 'Optional target date in YYYY-MM-DD format.'],
             ], ['title', 'target_amount', 'currency']),
             $this->declaration('create_budget', 'Prepare a monthly category budget for user review. It is not saved until explicitly confirmed.', [
-                'category' => ['type' => 'STRING', 'description' => 'Budget category, max 60 characters.'],
-                'amount' => ['type' => 'STRING', 'description' => 'Positive budget amount, at most two decimals.'],
+                'category' => ['type' => 'string', 'description' => 'Budget category, max 60 characters.'],
+                'amount' => ['type' => 'string', 'description' => 'Positive budget amount, at most two decimals.'],
                 'currency' => $this->currencyProperty(),
             ], ['category', 'amount', 'currency']),
             $this->declaration('save_plan', 'Prepare a financial planning note for user review. It is not saved until explicitly confirmed.', [
-                'title' => ['type' => 'STRING', 'description' => 'Plan title, max 120 characters.'],
-                'summary' => ['type' => 'STRING', 'description' => 'Short plan with assumptions, max 500 characters.'],
+                'title' => ['type' => 'string', 'description' => 'Plan title, max 120 characters.'],
+                'summary' => ['type' => 'string', 'description' => 'Short plan with assumptions, max 500 characters.'],
             ], ['title', 'summary']),
         ];
     }
@@ -79,6 +92,8 @@ class AgentToolRegistry
                 'convert_currency' => $this->calculator->convert($data['amount'], $data['from_currency'], $data['to_currency']),
                 'analyze_spending' => $this->analyzeSpending($user, $data['period_days']),
                 'plan_tuition' => $this->planTuition($user, $data['tuition_plan_id']),
+                'update_savings_goal' => $this->prepareSavingsGoalUpdate($user, $conversation, $data),
+                'update_tuition_plan' => $this->prepareTuitionPlanUpdate($user, $conversation, $data),
                 'compare_remittance' => [
                     'quotes' => $this->calculator->compareRemittance($data['amount'], $data['from_currency'], $data['to_currency']),
                     'reference' => $this->calculator->convert($data['amount'], $data['from_currency'], $data['to_currency']),
@@ -104,45 +119,80 @@ class AgentToolRegistry
     {
         $this->assertConversationOwner($user, $conversation);
 
-        return DB::transaction(function () use ($user, $conversation, $pendingActionId): array {
+        $result = DB::transaction(function () use ($user, $conversation, $pendingActionId): array {
             $pending = $user->agentPendingActions()
                 ->where('conversation_id', $conversation->id)
                 ->lockForUpdate()
                 ->findOrFail($pendingActionId);
 
-            if ($pending->status !== 'pending' || $pending->expires_at->isPast()) {
+            if ($pending->status !== 'pending') {
                 throw new \InvalidArgumentException('This confirmation has expired or has already been used.');
+            }
+
+            if ($pending->expires_at->isPast()) {
+                $pending->update(['status' => 'expired']);
+                $this->audit($user, $conversation, $pending->tool_name, 'expired');
+                $this->recordPendingActionOutcome($conversation, $pending->id, 'expired', null);
+
+                return ['_confirmation_expired' => true];
             }
 
             $name = $pending->tool_name;
             $data = $this->validateArguments($name, $pending->arguments);
 
-            return match ($name) {
+            $saved = match ($name) {
                 'create_savings_goal' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->saveGoal($user, $data)),
                 'create_budget' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->saveBudget($user, $data)),
                 'save_plan' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->savePlan($user, $data)),
+                'update_savings_goal' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->updateSavingsGoal($user, $data, $pending->before_state ?? [])),
+                'update_tuition_plan' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->updateTuitionPlan($user, $data, $pending->before_state ?? [])),
                 default => throw new \InvalidArgumentException('This action does not support confirmation.'),
             };
+
+            $this->recordPendingActionOutcome($conversation, $pending->id, 'confirmed', $saved);
+
+            return $saved;
         });
+
+        if (isset($result['_confirmation_expired'])) {
+            throw new \InvalidArgumentException('This confirmation has expired or has already been used.');
+        }
+
+        return $result;
     }
 
     public function cancel(User $user, AgentConversation $conversation, int $pendingActionId): void
     {
         $this->assertConversationOwner($user, $conversation);
 
-        DB::transaction(function () use ($user, $conversation, $pendingActionId): void {
+        $expired = DB::transaction(function () use ($user, $conversation, $pendingActionId): bool {
             $pending = $user->agentPendingActions()
                 ->where('conversation_id', $conversation->id)
                 ->lockForUpdate()
                 ->findOrFail($pendingActionId);
 
-            if ($pending->status !== 'pending' || $pending->expires_at->isPast()) {
+            if ($pending->status !== 'pending') {
                 throw new \InvalidArgumentException('This pending action has expired or has already been handled.');
+            }
+
+            if ($pending->expires_at->isPast()) {
+                $pending->update(['status' => 'expired']);
+                $this->audit($user, $conversation, $pending->tool_name, 'expired');
+                $this->recordPendingActionOutcome($conversation, $pending->id, 'expired', null);
+
+                return true;
             }
 
             $pending->update(['status' => 'cancelled']);
             $this->audit($user, $conversation, $pending->tool_name, 'cancelled');
+            $this->recordPendingActionOutcome($conversation, $pending->id, 'cancelled', null);
+
+            return false;
         });
+
+        if ($expired) {
+            throw new \InvalidArgumentException('This pending action has expired or has already been handled.');
+        }
     }
 
     /**
@@ -156,9 +206,10 @@ class AgentToolRegistry
             'name' => $name,
             'description' => $description,
             'parameters' => [
-                'type' => 'OBJECT',
+                'type' => 'object',
                 'properties' => (object) $properties,
                 'required' => $required,
+                'additionalProperties' => false,
             ],
         ];
     }
@@ -169,7 +220,7 @@ class AgentToolRegistry
     private function currencyProperty(): array
     {
         return [
-            'type' => 'STRING',
+            'type' => 'string',
             'description' => 'Three-letter currency code from the supported list.',
             'enum' => $this->exchangeRates->currencies(),
         ];
@@ -190,12 +241,23 @@ class AgentToolRegistry
             ],
             'analyze_spending' => ['period_days' => ['required', 'integer', 'min:1', 'max:365']],
             'plan_tuition' => ['tuition_plan_id' => ['required', 'integer', 'min:1']],
+            'update_savings_goal' => [
+                'goal_id' => ['required', 'integer', 'min:1'],
+                'target_amount' => ['required', 'string', 'numeric', 'gt:0', 'regex:/^(?:0|[1-9]\d{0,7})(?:\.\d{1,2})?$/'],
+            ],
+            'update_tuition_plan' => [
+                'tuition_plan_id' => ['required', 'integer', 'min:1'],
+                'amount' => ['sometimes', 'string', 'numeric', 'gt:0', 'regex:/^(?:0|[1-9]\d{0,7})(?:\.\d{1,2})?$/'],
+                'saved_amount' => ['sometimes', 'string', 'regex:/^(?:0|[1-9]\d{0,7})(?:\.\d{1,2})?$/'],
+                'due_date' => ['sometimes', 'date_format:Y-m-d', 'after_or_equal:today'],
+                'installments' => ['sometimes', 'integer', 'min:1', 'max:24'],
+            ],
             'create_savings_goal' => [
                 'title' => ['required', 'string', 'max:120'],
                 'target_amount' => ['required', 'string', 'numeric', 'gt:0', 'regex:/^(?:0|[1-9]\d{0,7})(?:\.\d{1,2})?$/'],
                 'current_amount' => ['nullable', 'string', 'regex:/^(?:0|[1-9]\d{0,7})(?:\.\d{1,2})?$/'],
                 'currency' => ['required', 'string', Rule::in($this->exchangeRates->currencies())],
-                'target_date' => ['nullable', 'date', 'after_or_equal:today'],
+                'target_date' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:today'],
             ],
             'create_budget' => [
                 'category' => ['required', 'string', 'max:60'],
@@ -223,6 +285,23 @@ class AgentToolRegistry
             }
         }
 
+        if ($name === 'update_savings_goal') {
+            $data['target_amount'] = CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($data['target_amount']));
+        }
+
+        if ($name === 'update_tuition_plan') {
+            foreach (['amount', 'saved_amount'] as $field) {
+                if (isset($data[$field])) {
+                    $data[$field] = CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($data[$field]));
+                }
+            }
+        }
+
+        if ($name === 'update_tuition_plan'
+            && array_intersect(array_keys($data), ['amount', 'saved_amount', 'due_date', 'installments']) === []) {
+            throw ValidationException::withMessages(['tuition_plan_id' => 'Provide at least one tuition plan change.']);
+        }
+
         return $data;
     }
 
@@ -233,9 +312,9 @@ class AgentToolRegistry
     {
         $profile = $user->studentProfile;
         $upcomingTuition = $user->tuitionPlans()->whereDate('due_date', '>=', today())->orderBy('due_date')->limit(5)->get([
-            'title', 'amount', 'saved_amount', 'currency', 'due_date',
+            'id', 'title', 'amount', 'saved_amount', 'currency', 'due_date', 'installments',
         ]);
-        $goals = $user->savingsGoals()->latest()->limit(5)->get(['title', 'target_amount', 'current_amount', 'currency', 'target_date']);
+        $goals = $user->savingsGoals()->latest()->limit(5)->get(['id', 'title', 'target_amount', 'current_amount', 'currency', 'target_date']);
 
         return [
             'profile' => $profile === null ? null : [
@@ -245,7 +324,14 @@ class AgentToolRegistry
             ],
             'recorded_activity_count' => $user->transactions()->count(),
             'upcoming_tuition' => $upcomingTuition,
-            'savings_goals' => $goals,
+            'savings_goals' => $goals->map(fn ($goal): array => [
+                'id' => $goal->id,
+                'title' => $goal->title,
+                'target_amount' => $goal->target_amount,
+                'current_amount' => $goal->current_amount,
+                'currency' => $goal->currency,
+                'target_date' => $goal->target_date?->toDateString(),
+            ]),
             'note' => 'Only the signed-in user’s records are included. This is planning information, not financial advice.',
         ];
     }
@@ -319,11 +405,13 @@ class AgentToolRegistry
         $plan = $user->tuitionPlans()->whereKey($tuitionPlanId)->firstOrFail();
 
         return [
+            'id' => $plan->id,
             'title' => $plan->title,
             'amount' => $plan->amount,
             'saved_amount' => $plan->saved_amount,
             'currency' => $plan->currency,
             'due_date' => $plan->due_date->toDateString(),
+            'installment_count' => $plan->installments,
             'schedule' => $this->planner->tuitionSchedule((string) $plan->amount, (string) $plan->saved_amount, $plan->due_date->toDateString()),
             'installments' => $this->planner->installmentSchedule((string) $plan->amount, (string) $plan->saved_amount, $plan->due_date->toDateString(), $plan->installments),
         ];
@@ -331,22 +419,167 @@ class AgentToolRegistry
 
     /**
      * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function prepareSavingsGoalUpdate(User $user, AgentConversation $conversation, array $data): array
+    {
+        $goal = $user->savingsGoals()->whereKey($data['goal_id'])->firstOrFail();
+        $data['target_amount'] = CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($data['target_amount']));
+
+        if (CurrencyCalculator::toMinorUnits((string) $goal->current_amount) > CurrencyCalculator::toMinorUnits($data['target_amount'])) {
+            throw ValidationException::withMessages(['target_amount' => 'The new target cannot be less than the saved progress.']);
+        }
+
+        return $this->pendingAction($user, $conversation, 'update_savings_goal', $data, $this->savingsGoalSnapshot($goal));
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function prepareTuitionPlanUpdate(User $user, AgentConversation $conversation, array $data): array
+    {
+        $plan = $user->tuitionPlans()->whereKey($data['tuition_plan_id'])->firstOrFail();
+
+        foreach (['amount', 'saved_amount'] as $field) {
+            if (isset($data[$field])) {
+                $data[$field] = CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($data[$field]));
+            }
+        }
+
+        $amount = $data['amount'] ?? (string) $plan->amount;
+        $savedAmount = $data['saved_amount'] ?? (string) $plan->saved_amount;
+
+        if (CurrencyCalculator::toMinorUnits($savedAmount) > CurrencyCalculator::toMinorUnits($amount)) {
+            throw ValidationException::withMessages(['saved_amount' => 'Saved progress cannot exceed the updated tuition amount.']);
+        }
+
+        return $this->pendingAction($user, $conversation, 'update_tuition_plan', $data, $this->tuitionPlanSnapshot($plan));
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $beforeState
+     * @return array<string, mixed>
+     */
+    private function updateSavingsGoal(User $user, array $data, array $beforeState): array
+    {
+        $goal = $user->savingsGoals()->lockForUpdate()->findOrFail($data['goal_id']);
+        $this->assertUnchangedSnapshot($beforeState, $this->savingsGoalSnapshot($goal));
+        $targetAmount = CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($data['target_amount']));
+
+        if (CurrencyCalculator::toMinorUnits((string) $goal->current_amount) > CurrencyCalculator::toMinorUnits($targetAmount)) {
+            throw ValidationException::withMessages(['target_amount' => 'The new target cannot be less than the saved progress.']);
+        }
+
+        $goal->update(['target_amount' => $targetAmount]);
+
+        return [
+            'saved' => true,
+            'record_type' => 'savings_goal',
+            'title' => $goal->title,
+            'id' => $goal->id,
+            'target_amount' => $goal->target_amount,
+            'currency' => $goal->currency,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $beforeState
+     * @return array<string, mixed>
+     */
+    private function updateTuitionPlan(User $user, array $data, array $beforeState): array
+    {
+        $plan = $user->tuitionPlans()->lockForUpdate()->findOrFail($data['tuition_plan_id']);
+        $this->assertUnchangedSnapshot($beforeState, $this->tuitionPlanSnapshot($plan));
+        $amount = $data['amount'] ?? (string) $plan->amount;
+        $savedAmount = $data['saved_amount'] ?? (string) $plan->saved_amount;
+
+        if (CurrencyCalculator::toMinorUnits($savedAmount) > CurrencyCalculator::toMinorUnits($amount)) {
+            throw ValidationException::withMessages(['saved_amount' => 'Saved progress cannot exceed the updated tuition amount.']);
+        }
+
+        $plan->update([
+            'amount' => CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($amount)),
+            'saved_amount' => CurrencyCalculator::formatMinorUnits(CurrencyCalculator::toMinorUnits($savedAmount)),
+            ...array_intersect_key($data, array_flip(['due_date', 'installments'])),
+        ]);
+
+        return [
+            'saved' => true,
+            'record_type' => 'tuition_plan',
+            'title' => $plan->title,
+            'id' => $plan->id,
+            'amount' => $plan->amount,
+            'saved_amount' => $plan->saved_amount,
+            'currency' => $plan->currency,
+            'due_date' => $plan->due_date->toDateString(),
+            'installments' => $plan->installments,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function savingsGoalSnapshot(SavingsGoal $goal): array
+    {
+        return [
+            'id' => $goal->id,
+            'title' => $goal->title,
+            'target_amount' => (string) $goal->target_amount,
+            'current_amount' => (string) $goal->current_amount,
+            'currency' => $goal->currency,
+            'target_date' => $goal->target_date?->toDateString(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function tuitionPlanSnapshot(TuitionPlan $plan): array
+    {
+        return [
+            'id' => $plan->id,
+            'title' => $plan->title,
+            'amount' => (string) $plan->amount,
+            'saved_amount' => (string) $plan->saved_amount,
+            'currency' => $plan->currency,
+            'due_date' => $plan->due_date->toDateString(),
+            'installments' => $plan->installments,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $expected
+     * @param  array<string, mixed>  $current
+     */
+    private function assertUnchangedSnapshot(array $expected, array $current): void
+    {
+        if ($expected !== $current) {
+            throw new \InvalidArgumentException('The record changed after this draft. Prepare a new action for review.');
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
      * @return array{confirmation_required: bool, pending_action: array<string, mixed>, message: string}
      */
-    private function pendingAction(User $user, AgentConversation $conversation, string $name, array $data): array
+    private function pendingAction(User $user, AgentConversation $conversation, string $name, array $data, ?array $beforeState = null): array
     {
         $pending = AgentPendingAction::create([
             'user_id' => $user->id,
             'conversation_id' => $conversation->id,
             'tool_name' => $name,
             'arguments' => $data,
+            'before_state' => $beforeState,
             'status' => 'pending',
             'expires_at' => now()->addMinutes(15),
         ]);
 
         return [
             'confirmation_required' => true,
-            'pending_action' => ['id' => $pending->id, 'name' => $name, 'arguments' => $data],
+            'pending_action' => ['id' => $pending->id, 'name' => $name, 'arguments' => $data, 'before_state' => $beforeState],
             'message' => 'This change has not been saved. Ask the user to review it and confirm explicitly.',
         ];
     }
@@ -361,6 +594,51 @@ class AgentToolRegistry
     }
 
     /**
+     * @param  array<string, mixed>|null  $outcome
+     */
+    private function recordPendingActionOutcome(AgentConversation $conversation, int $pendingActionId, string $status, ?array $outcome): void
+    {
+        foreach ($conversation->messages()->whereNotNull('tool_result')->get() as $message) {
+            $toolResults = $message->tool_result;
+
+            if (! is_array($toolResults)) {
+                continue;
+            }
+
+            $changed = false;
+
+            foreach ($toolResults as $index => $toolResult) {
+                $action = data_get($toolResult, 'result.pending_action');
+
+                if (! is_array($action) || (int) ($action['id'] ?? 0) !== $pendingActionId) {
+                    continue;
+                }
+
+                $toolResults[$index]['result']['pending_action'] = [
+                    ...$action,
+                    'status' => $status,
+                    'outcome' => $outcome,
+                    'status_message' => match ($status) {
+                        'confirmed' => 'Confirmed and saved to your Atlas account.',
+                        'cancelled' => 'Discarded. No planning changes were saved.',
+                        'expired' => 'This draft expired. No planning changes were saved.',
+                        default => 'This planning action was handled.',
+                    },
+                ];
+                $changed = true;
+                break;
+            }
+
+            if ($changed) {
+                $message->tool_result = $toolResults;
+                $message->save();
+
+                return;
+            }
+        }
+    }
+
+    /**
      * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
@@ -371,7 +649,15 @@ class AgentToolRegistry
             'current_amount' => $data['current_amount'] ?? '0.00',
         ]);
 
-        return ['saved' => true, 'record_type' => 'savings_goal', 'title' => $goal->title, 'id' => $goal->id];
+        return [
+            'saved' => true,
+            'record_type' => 'savings_goal',
+            'title' => $goal->title,
+            'target_amount' => $goal->target_amount,
+            'current_amount' => $goal->current_amount,
+            'currency' => $goal->currency,
+            'id' => $goal->id,
+        ];
     }
 
     /**
@@ -386,7 +672,16 @@ class AgentToolRegistry
             'period_end' => now()->endOfMonth()->toDateString(),
         ]);
 
-        return ['saved' => true, 'record_type' => 'budget', 'category' => $budget->category, 'id' => $budget->id];
+        return [
+            'saved' => true,
+            'record_type' => 'budget',
+            'category' => $budget->category,
+            'amount' => $budget->amount,
+            'currency' => $budget->currency,
+            'period_start' => $budget->period_start->toDateString(),
+            'period_end' => $budget->period_end->toDateString(),
+            'id' => $budget->id,
+        ];
     }
 
     /**
@@ -412,6 +707,7 @@ class AgentToolRegistry
                 'awaiting_confirmation' => 'A reversible planning change is pending explicit user confirmation.',
                 'confirmed' => 'The user explicitly confirmed a planning change.',
                 'cancelled' => 'The user discarded a pending planning change before it was saved.',
+                'expired' => 'A pending planning change expired before it was confirmed.',
                 default => 'Tool arguments or requested records were rejected.',
             },
         ]);

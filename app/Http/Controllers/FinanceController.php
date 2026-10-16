@@ -210,6 +210,7 @@ class FinanceController extends Controller
             'categoryBreakdown' => $categoryCards,
             'filter' => $filter,
             'currencies' => app(ExchangeRateService::class)->currencies(),
+            'currencyNames' => app(ExchangeRateService::class)->currencyNames(),
             'selectedConversation' => $selectedConversation,
         ]);
     }
@@ -459,7 +460,7 @@ class FinanceController extends Controller
             return response()->json(['message' => 'The transfer fee must be less than the tuition amount.'], 422);
         }
 
-        $budgetInputCurrency = $request->user()->studentProfile?->home_currency ?? 'USD';
+        $budgetInputCurrency = $request->user()->studentProfile?->home_currency ?? $data['budget_currency'];
 
         return $this->calculate(function () use ($data, $amountMinor, $feeMinor, $planner, $calculator, $budgetInputCurrency): array {
             $tuition = $planner->tuitionSchedule($data['tuition_amount'], $data['saved_amount'], $data['due_date']);

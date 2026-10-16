@@ -5,14 +5,15 @@ namespace Tests\Feature;
 use App\Models\StudentProfile;
 use App\Models\User;
 use App\Services\AgentToolRegistry;
-use App\Services\GeminiAgent;
-use App\Services\GeminiProviderException;
+use App\Services\OpenRouterAgent;
+use App\Services\OpenRouterClient;
+use App\Services\OpenRouterProviderException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Sleep;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 use Tests\TestCase;
@@ -20,6 +21,15 @@ use Tests\TestCase;
 class AgentToolTest extends TestCase
 {
     use RefreshDatabase;
+
+    private const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Config::set('services.openrouter.model', 'openai/gpt-4o-mini');
+    }
 
     public function test_agent_tools_only_read_records_belonging_to_the_signed_in_user(): void
     {
@@ -34,10 +44,9 @@ class AgentToolTest extends TestCase
             'installments' => 2,
         ]);
         $conversation = $owner->agentConversations()->create(['title' => 'My plan']);
-        $registry = app(AgentToolRegistry::class);
 
         try {
-            $registry->execute($owner, 'plan_tuition', ['tuition_plan_id' => $foreignPlan->id], $conversation);
+            app(AgentToolRegistry::class)->execute($owner, 'plan_tuition', ['tuition_plan_id' => $foreignPlan->id], $conversation);
             $this->fail('A user must not read another user’s tuition plan.');
         } catch (ModelNotFoundException) {
             $this->assertDatabaseHas('agent_audit_logs', [
@@ -65,19 +74,17 @@ class AgentToolTest extends TestCase
         $registry->execute($user, 'analyze_spending', ['period_days' => 0], $conversation);
     }
 
-    public function test_mutating_tool_waits_for_explicit_confirmation_and_writes_an_audit_trail(): void
+    public function test_mutating_tool_waits_for_confirmation_before_saving_and_writes_an_audit_trail(): void
     {
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Savings']);
         $registry = app(AgentToolRegistry::class);
-        $arguments = [
+        $prepared = $registry->execute($user, 'create_savings_goal', [
             'title' => 'Emergency fund',
             'target_amount' => '1200.00',
             'currency' => 'USD',
             'current_amount' => '100.00',
-        ];
-
-        $prepared = $registry->execute($user, 'create_savings_goal', $arguments, $conversation);
+        ], $conversation);
 
         $this->assertTrue($prepared['confirmation_required']);
         $this->assertDatabaseCount('savings_goals', 0);
@@ -90,7 +97,146 @@ class AgentToolTest extends TestCase
         $this->assertDatabaseHas('agent_audit_logs', ['status' => 'confirmed']);
     }
 
-    public function test_tuition_tool_returns_deterministic_savings_plan_for_an_owned_record(): void
+    public function test_savings_goal_updates_keep_currency_and_require_owned_confirmation(): void
+    {
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        $goal = $user->savingsGoals()->create([
+            'title' => 'Emergency fund',
+            'target_amount' => '1000.00',
+            'current_amount' => '250.00',
+            'currency' => 'CAD',
+        ]);
+        $foreignGoal = $other->savingsGoals()->create([
+            'title' => 'Private goal',
+            'target_amount' => '2000.00',
+            'current_amount' => '0.00',
+            'currency' => 'USD',
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Goal update']);
+        $registry = app(AgentToolRegistry::class);
+
+        try {
+            $registry->execute($user, 'update_savings_goal', [
+                'goal_id' => $foreignGoal->id,
+                'target_amount' => '3000.00',
+            ], $conversation);
+            $this->fail('A goal update must not access another user’s goal.');
+        } catch (ModelNotFoundException) {
+            $this->assertDatabaseHas('savings_goals', [
+                'id' => $goal->id,
+                'target_amount' => '1000.00',
+                'currency' => 'CAD',
+            ]);
+        }
+
+        $prepared = $registry->execute($user, 'update_savings_goal', [
+            'goal_id' => $goal->id,
+            'target_amount' => '1500.00',
+        ], $conversation);
+
+        $this->assertSame('CAD', $prepared['pending_action']['before_state']['currency']);
+        $this->assertDatabaseHas('savings_goals', [
+            'id' => $goal->id,
+            'target_amount' => '1000.00',
+            'currency' => 'CAD',
+        ]);
+
+        try {
+            $registry->confirm($other, $conversation, (int) $prepared['pending_action']['id']);
+            $this->fail('Only the owner may confirm a planning change.');
+        } catch (ModelNotFoundException) {
+            $this->assertDatabaseHas('agent_pending_actions', [
+                'id' => $prepared['pending_action']['id'],
+                'status' => 'pending',
+            ]);
+        }
+
+        $saved = $registry->confirm($user, $conversation, (int) $prepared['pending_action']['id']);
+
+        $this->assertSame('1500.00', $saved['target_amount']);
+        $this->assertSame('CAD', $saved['currency']);
+        $this->assertDatabaseHas('savings_goals', [
+            'id' => $goal->id,
+            'target_amount' => '1500.00',
+            'current_amount' => '250.00',
+            'currency' => 'CAD',
+        ]);
+        $this->assertDatabaseHas('agent_audit_logs', ['user_id' => $user->id, 'status' => 'confirmed']);
+    }
+
+    public function test_tuition_plan_updates_are_confirmed_and_reject_stale_or_invalid_changes(): void
+    {
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Tuition update']);
+        $plan = $user->tuitionPlans()->create([
+            'title' => 'Autumn tuition',
+            'amount' => '9000.00',
+            'saved_amount' => '1000.00',
+            'currency' => 'EUR',
+            'due_date' => today()->addMonths(5),
+            'installments' => 3,
+        ]);
+        $registry = app(AgentToolRegistry::class);
+        $prepared = $registry->execute($user, 'update_tuition_plan', [
+            'tuition_plan_id' => $plan->id,
+            'amount' => '12000.00',
+            'saved_amount' => '1500.00',
+            'due_date' => today()->addMonths(7)->toDateString(),
+            'installments' => 5,
+        ], $conversation);
+
+        $this->assertSame('EUR', $prepared['pending_action']['before_state']['currency']);
+        $this->assertDatabaseHas('tuition_plans', [
+            'id' => $plan->id,
+            'amount' => '9000.00',
+            'saved_amount' => '1000.00',
+            'currency' => 'EUR',
+        ]);
+
+        $saved = $registry->confirm($user, $conversation, (int) $prepared['pending_action']['id']);
+
+        $this->assertSame('12000.00', $saved['amount']);
+        $this->assertSame('1500.00', $saved['saved_amount']);
+        $this->assertSame('EUR', $saved['currency']);
+        $this->assertSame(5, $saved['installments']);
+        $this->assertDatabaseHas('tuition_plans', [
+            'id' => $plan->id,
+            'amount' => '12000.00',
+            'saved_amount' => '1500.00',
+            'currency' => 'EUR',
+            'installments' => 5,
+        ]);
+
+        try {
+            $registry->execute($user, 'update_tuition_plan', [
+                'tuition_plan_id' => $plan->id,
+                'saved_amount' => '13000.00',
+            ], $conversation);
+            $this->fail('Saved progress greater than tuition must be rejected.');
+        } catch (ValidationException) {
+            $this->assertDatabaseHas('tuition_plans', ['id' => $plan->id, 'amount' => '12000.00']);
+        }
+
+        $staleDraft = $registry->execute($user, 'update_tuition_plan', [
+            'tuition_plan_id' => $plan->id,
+            'amount' => '13000.00',
+        ], $conversation);
+        $plan->update(['title' => 'Changed outside the draft']);
+
+        try {
+            $registry->confirm($user, $conversation, (int) $staleDraft['pending_action']['id']);
+            $this->fail('A stale record must require a new draft instead of saving.');
+        } catch (InvalidArgumentException) {
+            $this->assertDatabaseHas('tuition_plans', [
+                'id' => $plan->id,
+                'title' => 'Changed outside the draft',
+                'amount' => '12000.00',
+            ]);
+        }
+    }
+
+    public function test_tuition_tool_returns_a_deterministic_savings_plan_for_an_owned_record(): void
     {
         $user = User::factory()->create();
         $plan = $user->tuitionPlans()->create([
@@ -105,6 +251,7 @@ class AgentToolTest extends TestCase
 
         $result = app(AgentToolRegistry::class)->execute($user, 'plan_tuition', ['tuition_plan_id' => $plan->id], $conversation);
 
+        $this->assertSame($plan->id, $result['id']);
         $this->assertSame('5000.00', $result['schedule']['remaining']);
         $this->assertSame('on_track', $result['schedule']['status']);
     }
@@ -180,15 +327,37 @@ class AgentToolTest extends TestCase
         $this->assertStringContainsString('did not search', $result['note']);
     }
 
-    public function test_gemini_function_call_is_executed_and_returned_for_explanation(): void
+    public function test_openrouter_uses_the_configured_model_endpoint_and_openai_tool_schema(): void
     {
-        Config::set('services.gemini.key', 'test-key');
+        Config::set('services.openrouter.key', 'private-test-key');
+        Config::set('services.openrouter.model', 'openai/gpt-4o-mini');
+        Http::preventStrayRequests();
         Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'get_financial_summary', 'args' => []],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'Your overview is ready.']]]]]]),
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('OK')),
+        ]);
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Endpoint']);
+        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Reply with OK']);
+
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Reply with OK');
+
+        $this->assertSame('OK', $result['text']);
+        Http::assertSent(fn (Request $request): bool => $request->url() === self::OPENROUTER_ENDPOINT
+            && $request->hasHeader('Authorization', 'Bearer private-test-key')
+            && $request['model'] === 'openai/gpt-4o-mini'
+            && $request['messages'][1]['content'] === 'Reply with OK'
+            && isset($request['tools'][0]['type'], $request['tools'][0]['function']['parameters'])
+            && ! str_contains($request->body(), 'private-test-key'));
+    }
+
+    public function test_openrouter_tool_calls_execute_and_return_results_in_the_follow_up_request(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('get_financial_summary', [], 'call_summary'))
+                ->push($this->textResponse('Your overview is ready.')),
         ]);
         $user = User::factory()->create();
         StudentProfile::create([
@@ -202,53 +371,21 @@ class AgentToolTest extends TestCase
         $conversation = $user->agentConversations()->create(['title' => 'Overview']);
         $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Show my overview']);
 
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Show my overview');
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Show my overview');
 
         $this->assertSame('Your overview is ready.', $result['text']);
         $this->assertSame('USD', $result['tool_results'][0]['result']['profile']['home_currency']);
         $this->assertSame(2, Http::recorded()->count());
         $this->assertDatabaseHas('agent_audit_logs', ['user_id' => $user->id, 'status' => 'completed']);
+        Http::assertSent(fn (Request $request): bool => collect($request['messages'] ?? [])
+            ->contains(fn (array $message): bool => ($message['role'] ?? null) === 'tool'
+                && ($message['tool_call_id'] ?? null) === 'call_summary'
+                && str_contains((string) ($message['content'] ?? ''), 'home_currency')));
     }
 
-    public function test_gemini_uses_the_configured_model_on_the_supported_generate_content_endpoint(): void
+    public function test_openrouter_can_execute_different_tools_across_multiple_bounded_rounds(): void
     {
-        Config::set('services.gemini.key', 'test-key');
-        Config::set('services.gemini.model', 'gemini-3.8-flash');
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::response([
-                'candidates' => [['content' => ['parts' => [['text' => 'OK']]]]],
-            ]),
-        ]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Endpoint']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Reply with OK']);
-
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Reply with OK');
-
-        $this->assertSame('OK', $result['text']);
-        Http::assertSent(fn (Request $request): bool => $request->url() === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent'
-            && $request->hasHeader('x-goog-api-key', 'test-key')
-            && $request['contents'][0]['parts'][0]['text'] === 'Reply with OK'
-            && isset($request['tools'][0]['functionDeclarations'])
-            && $this->hasObjectSchemasForNoArgumentFunctions($request)
-            && ! str_contains(json_encode($request->data(), JSON_THROW_ON_ERROR), 'test-key'));
-    }
-
-    private function hasObjectSchemasForNoArgumentFunctions(Request $request): bool
-    {
-        $payload = json_decode($request->body());
-        $declarations = $payload->tools[0]->functionDeclarations ?? [];
-
-        return isset($declarations[0]->parameters->properties, $declarations[1]->parameters->properties)
-            && is_object($declarations[0]->parameters->properties)
-            && is_object($declarations[1]->parameters->properties)
-            && (array) $declarations[0]->parameters->properties === []
-            && (array) $declarations[1]->parameters->properties === [];
-    }
-
-    public function test_gemini_can_run_multiple_bounded_tools_before_a_final_answer(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
+        Config::set('services.openrouter.key', 'test-key');
         $user = User::factory()->create();
         $plan = $user->tuitionPlans()->create([
             'title' => 'Spring tuition',
@@ -260,70 +397,179 @@ class AgentToolTest extends TestCase
         ]);
         $conversation = $user->agentConversations()->create(['title' => 'Multi-step']);
         $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Summarize and plan tuition']);
+        Http::preventStrayRequests();
         Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'get_financial_summary', 'args' => []],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'plan_tuition', 'args' => ['tuition_plan_id' => $plan->id]],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'Your tuition pace is ready.']]]]]]),
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('get_financial_summary', [], 'call_summary'))
+                ->push($this->toolResponse('plan_tuition', ['tuition_plan_id' => $plan->id], 'call_tuition'))
+                ->push($this->textResponse('Your tuition pace is ready.')),
         ]);
 
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Summarize and plan tuition');
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Summarize and plan tuition');
 
         $this->assertSame('Your tuition pace is ready.', $result['text']);
         $this->assertSame(['get_financial_summary', 'plan_tuition'], collect($result['tool_results'])->pluck('name')->all());
-        $this->assertCount(3, Http::recorded());
+        $this->assertSame(3, Http::recorded()->count());
     }
 
-    public function test_gemini_tool_loop_stops_after_the_configured_limit(): void
+    public function test_complete_openrouter_tool_registry_uses_supported_json_schema_shapes(): void
     {
-        Config::set('services.gemini.key', 'test-key');
+        $declarations = app(AgentToolRegistry::class)->declarations();
+        $expectedNames = [
+            'get_financial_summary',
+            'get_funding_opportunities',
+            'convert_currency',
+            'analyze_spending',
+            'plan_tuition',
+            'update_savings_goal',
+            'update_tuition_plan',
+            'compare_remittance',
+            'create_savings_goal',
+            'create_budget',
+            'save_plan',
+        ];
+
+        $this->assertSame($expectedNames, array_column($declarations, 'name'));
+
+        foreach ($declarations as $declaration) {
+            $parameters = $declaration['parameters'];
+            $properties = (array) $parameters['properties'];
+
+            $this->assertSame('object', $parameters['type']);
+            $this->assertFalse($parameters['additionalProperties']);
+            $this->assertSame([], array_diff($parameters['required'], array_keys($properties)));
+            $this->assertSame(
+                ['type', 'properties', 'required', 'additionalProperties'],
+                array_keys($parameters),
+            );
+            $this->assertJson(json_encode($parameters, JSON_THROW_ON_ERROR));
+
+            foreach ($properties as $property) {
+                $this->assertContains($property['type'], ['string', 'integer']);
+                $this->assertSame(
+                    [],
+                    array_diff(array_keys($property), ['type', 'description', 'enum']),
+                );
+
+                if (isset($property['enum'])) {
+                    $this->assertNotEmpty($property['enum']);
+                    $this->assertSame([], array_filter($property['enum'], fn (mixed $value): bool => ! is_string($value)));
+                }
+            }
+        }
+    }
+
+    public function test_openrouter_multi_turn_payload_pairs_each_assistant_tool_call_with_ordered_tool_results(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Config::set('services.openrouter.model', 'cohere/north-mini-code:free');
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1000.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => true,
+        ]);
+        $tuitionPlan = $user->tuitionPlans()->create([
+            'title' => 'Synthetic tuition plan',
+            'amount' => '3000.00',
+            'saved_amount' => '500.00',
+            'currency' => 'USD',
+            'due_date' => today()->addMonths(4),
+            'installments' => 2,
+        ]);
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('get_financial_summary', [], 'synthetic_summary_call'))
+                ->push($this->toolResponse('plan_tuition', ['tuition_plan_id' => $tuitionPlan->id], 'synthetic_tuition_call'))
+                ->push($this->textResponse('Synthetic planning analysis complete.')),
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Synthetic multi-turn']);
+        foreach ([
+            ['user', 'Synthetic prior question one.'],
+            ['assistant', 'Synthetic prior answer one.'],
+            ['user', 'Synthetic prior question two.'],
+            ['assistant', 'Synthetic prior answer two.'],
+            ['user', 'Summarize and plan synthetic tuition.'],
+        ] as [$role, $content]) {
+            $conversation->messages()->create([
+                'user_id' => $user->id,
+                'role' => $role,
+                'content' => $content,
+            ]);
+        }
+
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Summarize and plan synthetic tuition.');
+
+        $this->assertSame('Synthetic planning analysis complete.', $result['text']);
+        $this->assertSame(['get_financial_summary', 'plan_tuition'], array_column($result['tool_results'], 'name'));
+        $this->assertSame(3, Http::recorded()->count());
+        Http::assertSentInOrder([
+            fn (Request $request): bool => $request['model'] === 'cohere/north-mini-code:free'
+                && $request['tool_choice'] === 'auto'
+                && count($request['tools']) === 11
+                && count($request['messages']) === 6
+                && array_column($request['messages'], 'role') === ['system', 'user', 'assistant', 'user', 'assistant', 'user'],
+            fn (Request $request): bool => $request['tool_choice'] === 'auto'
+                && count($request['tools']) === 11
+                && array_column($request['messages'], 'role') === ['system', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'tool']
+                && $request['messages'][6]['tool_calls'][0]['id'] === 'synthetic_summary_call'
+                && $request['messages'][7]['tool_call_id'] === 'synthetic_summary_call'
+                && is_string($request['messages'][7]['content']),
+            fn (Request $request): bool => $request['tool_choice'] === 'auto'
+                && count($request['tools']) === 11
+                && array_column($request['messages'], 'role') === ['system', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'tool', 'assistant', 'tool']
+                && $request['messages'][8]['tool_calls'][0]['id'] === 'synthetic_tuition_call'
+                && $request['messages'][9]['tool_call_id'] === 'synthetic_tuition_call'
+                && json_decode($request['messages'][9]['content'], true, 512, JSON_THROW_ON_ERROR)['id'] === (string) $tuitionPlan->id,
+        ]);
+    }
+
+    public function test_openrouter_tool_rounds_stop_at_the_safe_limit(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('get_financial_summary', [], 'call_1'))
+                ->push($this->toolResponse('get_financial_summary', [], 'call_2'))
+                ->push($this->toolResponse('get_financial_summary', [], 'call_3'))
+                ->push($this->toolResponse('get_financial_summary', [], 'call_4'))
+                ->push($this->toolResponse('get_financial_summary', [], 'call_5')),
+        ]);
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Bounded tools']);
         $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Keep checking my summary']);
-        $toolCall = ['candidates' => [['content' => ['parts' => [[
-            'functionCall' => ['name' => 'get_financial_summary', 'args' => []],
-        ]]]]]];
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push($toolCall)
-                ->push($toolCall)
-                ->push($toolCall)
-                ->push($toolCall)
-                ->push($toolCall),
-        ]);
 
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Keep checking my summary');
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Keep checking my summary');
 
         $this->assertCount(4, $result['tool_results']);
         $this->assertStringContainsString('safe limit', $result['text']);
-        $this->assertCount(5, Http::recorded());
+        $this->assertSame(5, Http::recorded()->count());
     }
 
-    public function test_gemini_skips_duplicate_mutating_tool_calls_in_the_same_turn(): void
+    public function test_duplicate_mutating_tool_calls_are_not_repeated_in_a_turn(): void
     {
-        Config::set('services.gemini.key', 'test-key');
-        $call = ['name' => 'create_savings_goal', 'args' => [
-            'title' => 'Emergency fund',
-            'target_amount' => '1000.00',
-            'currency' => 'USD',
-        ]];
+        Config::set('services.openrouter.key', 'test-key');
+        $arguments = ['title' => 'Emergency fund', 'target_amount' => '1000.00', 'currency' => 'USD'];
+        Http::preventStrayRequests();
         Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['candidates' => [['content' => ['parts' => [
-                    ['functionCall' => $call],
-                    ['functionCall' => $call],
-                ]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'The draft is ready for review.']]]]]]),
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push([
+                    'choices' => [['message' => ['role' => 'assistant', 'content' => null, 'tool_calls' => [
+                        $this->toolCall('create_savings_goal', $arguments, 'call_first'),
+                        $this->toolCall('create_savings_goal', $arguments, 'call_second'),
+                    ]]]]])
+                ->push($this->textResponse('The draft is ready for review.')),
         ]);
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Duplicate tool calls']);
         $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Create an emergency goal']);
 
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Create an emergency goal');
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Create an emergency goal');
 
         $this->assertCount(2, $result['tool_results']);
         $this->assertArrayHasKey('pending_action', $result['tool_results'][0]['result']);
@@ -332,67 +578,47 @@ class AgentToolTest extends TestCase
         $this->assertDatabaseCount('savings_goals', 0);
     }
 
-    public function test_gemini_rejects_an_oversized_tool_batch_before_any_tool_executes(): void
+    public function test_oversized_openrouter_tool_batch_is_rejected_before_any_tool_runs(): void
     {
-        Config::set('services.gemini.key', 'test-key');
+        Config::set('services.openrouter.key', 'test-key');
+        $calls = [];
+
+        for ($index = 0; $index < 5; $index++) {
+            $calls[] = $this->toolCall('get_financial_summary', [], 'call_'.$index);
+        }
+
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'choices' => [['message' => ['role' => 'assistant', 'content' => null, 'tool_calls' => $calls]]],
+            ]),
+        ]);
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Oversized batch']);
         $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Summarize my finances']);
-        $parts = array_fill(0, 5, ['functionCall' => ['name' => 'get_financial_summary', 'args' => []]]);
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::response([
-                'candidates' => [['content' => ['parts' => $parts]]],
-            ]),
-        ]);
 
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Summarize my finances');
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Summarize my finances');
 
         $this->assertStringContainsString('safe tool-call limit', $result['text']);
         $this->assertSame([], $result['tool_results']);
         $this->assertDatabaseCount('agent_audit_logs', 0);
-        $this->assertCount(1, Http::recorded());
-    }
-
-    public function test_gemini_response_cannot_claim_a_prepared_write_was_already_saved(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'create_savings_goal', 'args' => [
-                        'title' => 'Emergency fund',
-                        'target_amount' => '1000.00',
-                        'currency' => 'USD',
-                    ]],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'I saved your goal.']]]]]]),
-        ]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Prepare a goal']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Save a goal']);
-
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Save a goal');
-
-        $this->assertStringContainsString('No planning changes were saved.', $result['text']);
-        $this->assertTrue($result['tool_results'][0]['result']['confirmation_required']);
-        $this->assertDatabaseCount('savings_goals', 0);
+        $this->assertSame(1, Http::recorded()->count());
     }
 
     public function test_invalid_model_tool_arguments_are_not_executed(): void
     {
-        Config::set('services.gemini.key', 'test-key');
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
         Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'analyze_spending', 'args' => ['period_days' => 9999]],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'I could not analyze that period.']]]]]]),
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('analyze_spending', ['period_days' => 9999], 'call_invalid'))
+                ->push($this->textResponse('I could not analyze that period.')),
         ]);
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Invalid request']);
         $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Analyze everything']);
 
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Analyze everything');
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Analyze everything');
 
         $this->assertStringContainsString('I could not analyze that period.', $result['text']);
         $this->assertStringContainsString('At least one requested tool did not complete', $result['text']);
@@ -400,266 +626,475 @@ class AgentToolTest extends TestCase
         $this->assertDatabaseHas('agent_audit_logs', ['status' => 'rejected']);
     }
 
-    public function test_rate_limited_gemini_requests_preserve_sanitized_provider_diagnostics_after_bounded_retries(): void
+    public function test_prepared_openrouter_write_cannot_be_reported_as_already_saved(): void
     {
-        Config::set('services.gemini.key', 'test-key');
-        Sleep::fake();
-        Http::preventStrayRequests();
-        Http::fake(['https://generativelanguage.googleapis.com/*' => Http::response([
-            'error' => ['status' => 'RESOURCE_EXHAUSTED', 'message' => 'Per-minute request limit exceeded.'],
-        ], 429)]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Provider unavailable']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Try again']);
-
-        try {
-            app(GeminiAgent::class)->respond($user, $conversation, 'Try again');
-            $this->fail('A failed provider response must be surfaced.');
-        } catch (GeminiProviderException $exception) {
-            $this->assertSame(429, $exception->httpStatus);
-            $this->assertStringContainsString('HTTP 429 (RESOURCE_EXHAUSTED): Per-minute request limit exceeded.', $exception->getMessage());
-        }
-
-        $this->assertSame(3, Http::recorded()->count());
-        Sleep::assertSleptTimes(2);
-    }
-
-    public function test_malformed_gemini_request_preserves_sanitized_error_without_retrying(): void
-    {
-        Config::set('services.gemini.key', 'private-test-key');
-        Sleep::fake();
-        Http::preventStrayRequests();
-        Http::fake(['https://generativelanguage.googleapis.com/*' => Http::response([
-            'error' => [
-                'status' => 'INVALID_ARGUMENT',
-                'message' => 'Invalid value in tool declaration; echoed key private-test-key.',
-            ],
-        ], 400)]);
-        $user = User::factory()->create();
-
-        $response = $this->actingAs($user)->postJson(route('agent.chat'), [
-            'message' => 'Help me plan.',
-        ]);
-
-        $expectedMessage = 'Gemini API returned HTTP 400 (INVALID_ARGUMENT): Invalid value in tool declaration; echoed key [REDACTED].';
-        $response->assertStatus(502)->assertJsonPath('message', $expectedMessage);
-        $this->assertSame(1, Http::recorded()->count());
-        Sleep::assertSleptTimes(0);
-        $this->assertDatabaseHas('agent_messages', [
-            'user_id' => $user->id,
-            'role' => 'assistant',
-            'content' => $expectedMessage,
-        ]);
-    }
-
-    public function test_upstream_service_unavailability_keeps_its_diagnostic_and_status_after_retries(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Sleep::fake();
+        Config::set('services.openrouter.key', 'test-key');
         Http::preventStrayRequests();
         Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['error' => ['status' => 'UNAVAILABLE', 'message' => 'The model is temporarily at capacity.']], 503)
-                ->push(['error' => ['status' => 'UNAVAILABLE', 'message' => 'The model is temporarily at capacity.']], 503)
-                ->push(['error' => ['status' => 'UNAVAILABLE', 'message' => 'The model is temporarily at capacity.']], 503),
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_savings_goal', [
+                    'title' => 'Emergency fund',
+                    'target_amount' => '1000.00',
+                    'currency' => 'USD',
+                ], 'call_goal'))
+                ->push($this->textResponse('I saved your goal.')),
         ]);
         $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Prepare a goal']);
+        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Save a goal']);
 
-        $response = $this->actingAs($user)->postJson(route('agent.chat'), [
-            'message' => 'Help me plan.',
-        ]);
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Save a goal');
 
-        $response->assertStatus(503)->assertJsonPath(
-            'message',
-            'Gemini API returned HTTP 503 (UNAVAILABLE): The model is temporarily at capacity.',
-        );
-        $this->assertSame(3, Http::recorded()->count());
-        Sleep::assertSleptTimes(2);
+        $this->assertStringContainsString('No planning changes were saved.', $result['text']);
+        $this->assertTrue($result['tool_results'][0]['result']['confirmation_required']);
+        $this->assertDatabaseCount('savings_goals', 0);
     }
 
-    public function test_gemini_408_is_retried_with_bounded_backoff_and_reported_as_gateway_timeout(): void
+    public function test_chat_returns_a_safe_configuration_error_without_sending_a_request_when_key_is_missing(): void
     {
-        Config::set('services.gemini.key', 'test-key');
-        Sleep::fake();
+        Config::set('services.openrouter.key', null);
         Http::preventStrayRequests();
-        Http::fake(['https://generativelanguage.googleapis.com/*' => Http::response([
-            'error' => ['status' => 'REQUEST_TIMEOUT', 'message' => 'The request timed out.'],
-        ], 408)]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Provider timeout']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Try again']);
-
-        try {
-            app(GeminiAgent::class)->respond($user, $conversation, 'Try again');
-            $this->fail('A provider timeout must be surfaced.');
-        } catch (GeminiProviderException $exception) {
-            $this->assertSame(504, $exception->httpStatus);
-            $this->assertStringContainsString('HTTP 408 (REQUEST_TIMEOUT): The request timed out.', $exception->getMessage());
-        }
-
-        $this->assertSame(3, Http::recorded()->count());
-        Sleep::assertSleptTimes(2);
-    }
-
-    public function test_transport_timeout_is_retried_boundedly_and_reported_as_gateway_timeout(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Sleep::fake();
-        Http::preventStrayRequests();
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::failedConnection('cURL error 28: Operation timed out'),
-        ]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Transport timeout']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Try again']);
-
-        try {
-            app(GeminiAgent::class)->respond($user, $conversation, 'Try again');
-            $this->fail('A transport timeout must be surfaced.');
-        } catch (GeminiProviderException $exception) {
-            $this->assertSame(504, $exception->httpStatus);
-            $this->assertStringContainsString('Gemini request timed out after bounded retries.', $exception->getMessage());
-        }
-
-        $this->assertSame(3, Http::recorded()->count());
-        Sleep::assertSleptTimes(2);
-    }
-
-    public function test_gemini_retries_service_unavailability_with_bounded_backoff(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Sleep::fake();
-        Http::preventStrayRequests();
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['error' => ['message' => 'Temporarily unavailable.']], 503)
-                ->push(['error' => ['message' => 'Temporarily unavailable.']], 503)
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'Recovered.']]]]]]),
-        ]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Retry transient failure']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Reply briefly']);
-
-        $result = app(GeminiAgent::class)->respond($user, $conversation, 'Reply briefly');
-
-        $this->assertSame('Recovered.', $result['text']);
-        $this->assertSame(3, Http::recorded()->count());
-        Sleep::assertSlept(fn ($duration): bool => $duration->totalMilliseconds === 500.0, 1);
-        Sleep::assertSlept(fn ($duration): bool => $duration->totalMilliseconds === 1000.0, 1);
-        Sleep::assertSleptTimes(2);
-    }
-
-    public function test_gemini_authentication_and_missing_endpoint_errors_are_not_retried(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Http::preventStrayRequests();
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['error' => ['status' => 'UNAUTHENTICATED', 'message' => 'API key is invalid.']], 401)
-                ->push(['error' => ['status' => 'PERMISSION_DENIED', 'message' => 'API key lacks permission.']], 403)
-                ->push(['error' => ['status' => 'NOT_FOUND', 'message' => 'Configured model does not exist.']], 404),
-        ]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Provider configuration']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Help me plan']);
-
-        foreach ([
-            'HTTP 401' => 'API key',
-            'HTTP 403' => 'API key',
-            'HTTP 404' => 'model or endpoint',
-        ] as $status => $message) {
-            try {
-                app(GeminiAgent::class)->respond($user, $conversation, 'Help me plan');
-                $this->fail('A failed provider response must be surfaced.');
-            } catch (GeminiProviderException $exception) {
-                $this->assertSame(502, $exception->httpStatus);
-                $this->assertStringContainsString($status, $exception->getMessage());
-                $expectedDiagnostic = $status === 'HTTP 404' ? 'Configured model does not exist.' : $message;
-                $this->assertStringContainsString($expectedDiagnostic, $exception->getMessage());
-            }
-        }
-
-        $this->assertSame(3, Http::recorded()->count());
-    }
-
-    public function test_gemini_tls_certificate_errors_are_not_retried_or_misreported_as_503(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Sleep::fake();
-        Http::preventStrayRequests();
-        Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::failedConnection('cURL error 60: SSL certificate problem'),
-        ]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'TLS failure']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Try again']);
-
-        try {
-            app(GeminiAgent::class)->respond($user, $conversation, 'Try again');
-            $this->fail('A TLS failure must be surfaced.');
-        } catch (\RuntimeException $exception) {
-            $this->assertStringContainsString('TLS certificate verification failed', $exception->getMessage());
-            $this->assertStringNotContainsString('HTTP 503', $exception->getMessage());
-        }
-
-        $this->assertSame(1, Http::recorded()->count());
-        Sleep::assertSleptTimes(0);
-    }
-
-    public function test_unavailable_gemini_model_returns_a_clear_configuration_error(): void
-    {
-        Config::set('services.gemini.key', 'test-key');
-        Http::fake(['https://generativelanguage.googleapis.com/*' => Http::response([
-            'error' => ['status' => 'NOT_FOUND', 'message' => 'The requested model is unavailable.'],
-        ], 404)]);
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Unavailable model']);
-        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Help me plan']);
-
-        try {
-            app(GeminiAgent::class)->respond($user, $conversation, 'Help me plan');
-            $this->fail('An unavailable model must not be presented as a successful answer.');
-        } catch (GeminiProviderException $exception) {
-            $this->assertSame(502, $exception->httpStatus);
-            $this->assertSame('Gemini API returned HTTP 404 (NOT_FOUND): The requested model is unavailable.', $exception->getMessage());
-        }
-    }
-
-    public function test_chat_route_reports_missing_provider_configuration_without_faking_an_ai_reply(): void
-    {
-        Config::set('services.gemini.key', null);
         $user = User::factory()->create();
 
         $this->actingAs($user)->postJson(route('agent.chat'), [
             'message' => 'Help me plan tuition.',
-        ])->assertStatus(503)
-            ->assertJsonPath('message', 'Gemini is not configured. Set GEMINI_API_KEY on the server to enable the assistant.');
+        ])->assertServiceUnavailable()
+            ->assertJsonPath('message', 'Atlas AI is not configured. Set OPENROUTER_API_KEY on the server.');
 
         $this->assertDatabaseHas('agent_messages', ['user_id' => $user->id, 'role' => 'user']);
+        $this->assertSame(0, Http::recorded()->count());
     }
 
-    public function test_chat_endpoint_prepares_pending_actions_and_requires_confirm_or_cancel(): void
+    public function test_chat_hides_invalid_openrouter_api_key_details_from_the_user(): void
     {
-        Config::set('services.gemini.key', 'test-key');
+        $apiKey = 'private-test-key';
+        Config::set('services.openrouter.key', $apiKey);
         Http::preventStrayRequests();
         Http::fake([
-            'https://generativelanguage.googleapis.com/*' => Http::sequence()
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'create_savings_goal', 'args' => [
-                        'title' => 'Emergency fund',
-                        'target_amount' => '1200.00',
-                        'currency' => 'USD',
-                    ]],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'Review this goal before saving.']]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [[
-                    'functionCall' => ['name' => 'create_budget', 'args' => [
-                        'category' => 'Books',
-                        'amount' => '250.00',
-                        'currency' => 'USD',
-                    ]],
-                ]]]]]])
-                ->push(['candidates' => [['content' => ['parts' => [['text' => 'Review this budget before saving.']]]]]]),
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => ['code' => 'invalid_api_key', 'message' => 'Rejected key: '.$apiKey],
+            ], 401),
+        ]);
+        $user = User::factory()->create();
+
+        $response = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Help me plan.',
+        ]);
+
+        $response->assertServiceUnavailable()
+            ->assertJsonPath('message', 'OpenRouter rejected the configured API key. Verify OPENROUTER_API_KEY on the server.')
+            ->assertDontSee($apiKey);
+        $this->assertDatabaseMissing('agent_messages', ['content' => $apiKey]);
+        Http::assertSent(fn (Request $request): bool => $request->hasHeader('Authorization', 'Bearer '.$apiKey)
+            && ! str_contains($request->body(), $apiKey));
+    }
+
+    public function test_chat_reports_openrouter_rate_limits_without_raw_provider_details_or_retries(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => ['code' => 'rate_limit_exceeded', 'message' => 'Provider internal details'],
+            ], 429),
+        ]);
+        $user = User::factory()->create();
+
+        $response = $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Try again']);
+
+        $response->assertTooManyRequests()
+            ->assertJsonPath('message', 'OpenRouter is rate limiting Atlas right now. Try again in a moment.')
+            ->assertDontSee('Provider internal details');
+        $this->assertSame(1, Http::recorded()->count());
+    }
+
+    public function test_chat_logs_safe_openrouter_request_and_response_diagnostics_for_invalid_requests(): void
+    {
+        $apiKey = 'private-test-key';
+        $privateFinancialDetails = 'My tuition balance is 9876.54 EUR';
+        Config::set('services.openrouter.key', $apiKey);
+        Config::set('services.openrouter.model', 'cohere/north-mini-code:free');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => [
+                    'code' => 'invalid_request_error',
+                    'message' => 'Invalid tool follow-up message format.',
+                    'metadata' => ['error_type' => 'invalid_request'],
+                ],
+                'choices' => [[
+                    'finish_reason' => 'tool_calls',
+                    'message' => [
+                        'tool_calls' => [[
+                            'function' => [
+                                'name' => 'convert_currency',
+                                'arguments' => '{"amount":"9876.54","from_currency":"EUR","to_currency":"USD"}',
+                            ],
+                        ]],
+                    ],
+                ]],
+            ], 400),
+        ]);
+        Log::spy();
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => $privateFinancialDetails,
+        ])->assertStatus(502)
+            ->assertJsonPath('message', 'OpenRouter rejected the request. Check the configured model and try again.')
+            ->assertDontSee($privateFinancialDetails)
+            ->assertDontSee($apiKey);
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($apiKey, $privateFinancialDetails): bool {
+            $this->assertSame('OpenRouter API request failed.', $message);
+            $this->assertSame(400, $context['http_status']);
+            $this->assertSame('invalid_request', $context['error_category']);
+            $this->assertSame('invalid_request_error', $context['provider_code']);
+            $this->assertSame('Invalid tool follow-up message format.', $context['provider_error_message']);
+            $this->assertSame('tool_calls', $context['finish_reason']);
+            $this->assertTrue($context['response_tool_calls_present']);
+            $this->assertSame(1, $context['response_tool_call_count']);
+            $this->assertSame('auto', $context['request_tool_choice']);
+            $this->assertSame(11, $context['request_tool_count']);
+            $this->assertSame(2, $context['request_message_count']);
+            $this->assertStringNotContainsString($apiKey, json_encode($context));
+            $this->assertStringNotContainsString($privateFinancialDetails, json_encode($context));
+            $this->assertStringNotContainsString('9876.54', json_encode($context));
+
+            return true;
+        });
+    }
+
+    public function test_openrouter_client_captures_sanitized_provider_error_without_logging_request_data(): void
+    {
+        $apiKey = 'private-test-key';
+        $financialDetails = 'My tuition balance is 9876.54 EUR';
+        Config::set('services.openrouter.key', $apiKey);
+        Config::set('services.openrouter.model', 'cohere/north-mini-code:free');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => [
+                    'code' => 'invalid_request_error',
+                    'message' => 'Invalid request for key '.$apiKey,
+                    'metadata' => ['error_type' => 'invalid_request'],
+                ],
+                'choices' => [[
+                    'finish_reason' => 'tool_calls',
+                    'message' => [
+                        'tool_calls' => [[
+                            'function' => ['name' => 'convert_currency', 'arguments' => '{"amount":"9876.54"}'],
+                        ]],
+                    ],
+                ]],
+            ], 400),
+        ]);
+        Log::spy();
+
+        try {
+            app(OpenRouterClient::class)->complete([
+                'messages' => [
+                    ['role' => 'system', 'content' => 'Do not expose user data.'],
+                    ['role' => 'user', 'content' => $financialDetails],
+                ],
+                'tools' => [['type' => 'function', 'function' => ['name' => 'convert_currency']]],
+                'tool_choice' => 'auto',
+                'max_tokens' => 900,
+            ]);
+            $this->fail('A provider HTTP 400 should be surfaced as a provider exception.');
+        } catch (OpenRouterProviderException $exception) {
+            $this->assertSame(400, $exception->diagnostics['http_status']);
+            $this->assertSame('invalid_request_error', $exception->diagnostics['provider_code']);
+            $this->assertSame('invalid_request', $exception->diagnostics['error_category']);
+            $this->assertSame('Invalid request for key [redacted]', $exception->diagnostics['provider_error_message']);
+            $this->assertSame('tool_calls', $exception->diagnostics['finish_reason']);
+            $this->assertTrue($exception->diagnostics['response_tool_calls_present']);
+            $this->assertSame(1, $exception->diagnostics['response_tool_call_count']);
+            $this->assertSame('auto', $exception->diagnostics['request_tool_choice']);
+            $this->assertSame(1, $exception->diagnostics['request_tool_count']);
+        }
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($apiKey, $financialDetails): bool {
+            $this->assertSame('OpenRouter API request failed.', $message);
+            $this->assertStringNotContainsString($apiKey, json_encode($context));
+            $this->assertStringNotContainsString($financialDetails, json_encode($context));
+            $this->assertSame('Invalid request for key [redacted]', $context['provider_error_message']);
+
+            return true;
+        });
+    }
+
+    public function test_chat_reports_an_unavailable_model_without_exposing_provider_response_text(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Config::set('services.openrouter.model', 'unavailable/model');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => ['code' => 404, 'message' => 'No endpoints found for private provider configuration.'],
+            ], 404),
+        ]);
+        $user = User::factory()->create();
+
+        $response = $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Help me plan']);
+
+        $response->assertServiceUnavailable()
+            ->assertJsonPath('message', 'The configured OpenRouter model is unavailable. Verify OPENROUTER_MODEL on the server.')
+            ->assertDontSee('private provider configuration');
+    }
+
+    public function test_random_model_router_alias_is_rejected_before_a_provider_request(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Config::set('services.openrouter.model', 'openrouter/free');
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Help me plan'])
+            ->assertServiceUnavailable()
+            ->assertJsonPath('message', 'OPENROUTER_MODEL must be a specific model ID. The configured router can select different models; choose a fixed model that supports tool calling.');
+
+        $this->assertSame(0, Http::recorded()->count());
+    }
+
+    public function test_malformed_successful_provider_response_returns_a_safe_error(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response(['choices' => [['message' => ['role' => 'assistant']]]]),
+        ]);
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Help me plan'])
+            ->assertStatus(502)
+            ->assertJsonPath('message', 'OpenRouter returned a response without readable assistant content.');
+    }
+
+    public function test_chat_maps_provider_failures_and_timeouts_to_safe_messages(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => ['code' => 'provider_error', 'message' => 'Private upstream details'],
+            ], 500),
+        ]);
+        $user = User::factory()->create();
+
+        $providerResponse = $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Try again']);
+
+        $providerResponse->assertServiceUnavailable()
+            ->assertJsonPath('message', 'OpenRouter is temporarily unavailable. Try again later.')
+            ->assertDontSee('Private upstream details');
+
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::failedConnection('cURL error 28: Operation timed out'),
+        ]);
+
+        $timeoutResponse = $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Try again']);
+
+        $timeoutResponse->assertStatus(504)
+            ->assertJsonPath('message', 'OpenRouter did not respond before the request timed out. Try again later.');
+    }
+
+    public function test_openrouter_connection_command_makes_a_minimal_backend_request_without_printing_the_key(): void
+    {
+        Config::set('services.openrouter.key', 'private-test-key');
+        Config::set('services.openrouter.model', 'openai/gpt-4o-mini');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->toolResponse('atlas_tool_check', [
+                'token' => 'atlas-tool-check',
+            ], 'call_check')),
+        ]);
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('HTTP status: 200.')
+            ->expectsOutput('Finish reason: tool_calls.')
+            ->expectsOutput('tool_calls present: yes.')
+            ->expectsOutput('Tool call count: 1.')
+            ->expectsOutput('OpenRouter connection and tool-call smoke test succeeded for model openai/gpt-4o-mini.')
+            ->doesntExpectOutput('private-test-key')
+            ->assertSuccessful();
+
+        Http::assertSent(fn (Request $request): bool => $request->url() === self::OPENROUTER_ENDPOINT
+            && $request->hasHeader('Authorization', 'Bearer private-test-key')
+            && $request['messages'][0]['content'] === 'Call the tool with token atlas-tool-check.'
+            && $request['tool_choice'] === 'required'
+            && $request['tools'][0]['function']['name'] === 'atlas_tool_check'
+            && $request['max_tokens'] === 256
+            && ! str_contains($request->body(), 'private-test-key'));
+    }
+
+    public function test_openrouter_connection_command_rejects_models_that_do_not_call_the_probe_tool(): void
+    {
+        Config::set('services.openrouter.key', 'private-test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'choices' => [[
+                    'finish_reason' => 'length',
+                    'message' => ['role' => 'assistant', 'content' => null],
+                ]],
+            ]),
+        ]);
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('The configured OpenRouter model did not complete the required function-calling smoke test. Review the diagnostic details and model tool-call behavior.')
+            ->expectsOutput('HTTP status: 200.')
+            ->expectsOutput('Finish reason: length.')
+            ->expectsOutput('tool_calls present: no.')
+            ->expectsOutput('Error category: tool_call_not_returned.')
+            ->doesntExpectOutput('private-test-key')
+            ->assertFailed();
+    }
+
+    public function test_openrouter_connection_command_reports_safe_timeout_diagnostics(): void
+    {
+        Config::set('services.openrouter.key', 'private-test-key');
+        Config::set('services.openrouter.model', 'openai/gpt-4o-mini');
+        Config::set('services.openrouter.timeout', 25);
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::failedConnection('cURL error 28: Operation timed out'),
+        ]);
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('Model: openai/gpt-4o-mini')
+            ->expectsOutput('Total request timeout: 25s (connection timeout: 5s).')
+            ->expectsOutput('TLS verification: enabled; project CA bundle certs/cacert.pem is present.')
+            ->expectsOutput('Diagnostic: The request timed out, but transport statistics were unavailable to identify the phase.')
+            ->doesntExpectOutput('private-test-key')
+            ->assertFailed();
+    }
+
+    public function test_openrouter_connection_command_displays_redacted_upstream_rate_limit_details_without_logging_response_data(): void
+    {
+        $apiKey = 'private-test-key';
+        $providerMessage = 'Upstream throttled Bearer '.$apiKey.' sk-or-v1-1234567890abcdef';
+        Config::set('services.openrouter.key', $apiKey);
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => [
+                    'code' => 'rate_limit_exceeded',
+                    'message' => $providerMessage,
+                    'metadata' => [
+                        'error_type' => 'provider',
+                        'provider_name' => 'Example Provider',
+                    ],
+                ],
+            ], 429, ['Retry-After' => '17']),
+        ]);
+        Log::spy();
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('The upstream provider is rate limiting Atlas AI. Try again later or select another supported model.')
+            ->expectsOutput('Provider error message: Upstream throttled [redacted] [redacted]')
+            ->expectsOutput('Provider error type: provider')
+            ->expectsOutput('Provider error code: rate_limit_exceeded')
+            ->expectsOutput('Upstream provider: Example Provider')
+            ->expectsOutput('Retry-After: 17 seconds.')
+            ->expectsOutput('Rate limit source: upstream provider rate limit.')
+            ->doesntExpectOutput($apiKey)
+            ->assertFailed();
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(function (string $message, array $context) use ($apiKey, $providerMessage): bool {
+            $this->assertSame('OpenRouter API request failed.', $message);
+            $this->assertSame('Upstream throttled [redacted] [redacted]', $context['provider_error_message']);
+            $this->assertSame('rate_limit_exceeded', $context['provider_code']);
+            $this->assertArrayNotHasKey('provider_name', $context);
+            $this->assertStringNotContainsString($apiKey, json_encode($context));
+            $this->assertStringNotContainsString($providerMessage, json_encode($context));
+
+            return ($context['rate_limit_source'] ?? null) === 'upstream_provider';
+        });
+    }
+
+    public function test_openrouter_connection_command_identifies_account_rate_limits(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => [
+                    'code' => 'rate_limit_exceeded',
+                    'message' => 'OpenRouter account usage limit reached.',
+                    'metadata' => ['error_type' => 'account'],
+                ],
+            ], 429, ['Retry-After' => 'Fri, 16 Oct 2026 17:40:00 GMT']),
+        ]);
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('OpenRouter account limits are preventing Atlas AI from responding. Check your account usage and credits.')
+            ->expectsOutput('Retry-After: Fri, 16 Oct 2026 17:40:00 GMT.')
+            ->expectsOutput('Rate limit source: OpenRouter account or usage limits.')
+            ->assertFailed();
+    }
+
+    public function test_openrouter_connection_command_requires_a_fixed_model_configuration(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Config::set('services.openrouter.model', null);
+        Http::preventStrayRequests();
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('Atlas AI has no model configured. Set OPENROUTER_MODEL on the server.')
+            ->assertFailed();
+
+        $this->assertSame(0, Http::recorded()->count());
+    }
+
+    public function test_openrouter_api_key_is_not_rendered_in_dashboard_html(): void
+    {
+        Config::set('services.openrouter.key', 'private-test-key');
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('Key configured · connection not verified')
+            ->assertDontSee('private-test-key');
+    }
+
+    public function test_chat_requires_authentication_valid_input_and_a_user_owned_conversation(): void
+    {
+        Http::preventStrayRequests();
+        $owner = User::factory()->create();
+        $other = User::factory()->create();
+        $conversation = $owner->agentConversations()->create(['title' => 'Private conversation']);
+
+        $this->postJson(route('agent.chat'), ['message' => 'Help me'])
+            ->assertUnauthorized();
+        $this->actingAs($other)->postJson(route('agent.chat'), ['message' => ''])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('message');
+        $this->actingAs($other)->postJson(route('agent.chat'), [
+            'message' => 'Help me',
+            'conversation_id' => $conversation->id,
+        ])->assertNotFound();
+        $this->assertSame(0, Http::recorded()->count());
+    }
+
+    public function test_chat_endpoint_requires_confirmation_before_saving_planning_actions(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_savings_goal', [
+                    'title' => 'Emergency fund',
+                    'target_amount' => '1200.00',
+                    'currency' => 'USD',
+                ], 'call_goal'))
+                ->push($this->textResponse('Review this goal before saving.'))
+                ->push($this->toolResponse('create_budget', [
+                    'category' => 'Books',
+                    'amount' => '250.00',
+                    'currency' => 'USD',
+                ], 'call_budget'))
+                ->push($this->textResponse('Review this budget before saving.')),
         ]);
         $user = User::factory()->create();
 
@@ -669,38 +1104,42 @@ class AgentToolTest extends TestCase
             ->assertJsonPath('text', "Review this goal before saving.\n\nNo planning changes were saved. Review each draft and confirm it, or choose Not now.")
             ->assertJsonPath('pending_actions.0.name', 'create_savings_goal');
 
-        $goalActionId = $goalResponse->json('pending_actions.0.id');
-        $conversationId = $goalResponse->json('conversation_id');
         $this->assertDatabaseCount('savings_goals', 0);
-
         $this->postJson(route('agent.confirm'), [
-            'conversation_id' => $conversationId,
-            'pending_action_id' => $goalActionId,
+            'conversation_id' => $goalResponse->json('conversation_id'),
+            'pending_action_id' => $goalResponse->json('pending_actions.0.id'),
             'confirmed' => true,
-        ])->assertOk()
-            ->assertJsonPath('saved.saved', true);
+            'arguments' => ['target_amount' => '999999.00'],
+            'target_amount' => '999999.00',
+        ])->assertOk()->assertJsonPath('saved.saved', true);
         $this->assertDatabaseHas('savings_goals', [
             'user_id' => $user->id,
             'title' => 'Emergency fund',
+            'target_amount' => '1200.00',
         ]);
+        $this->getJson(route('agent.history', $goalResponse->json('conversation_id')))
+            ->assertOk()
+            ->assertJsonPath('messages.1.tool_result.0.result.pending_action.status', 'confirmed')
+            ->assertJsonPath('messages.1.tool_result.0.result.pending_action.outcome.target_amount', '1200.00');
 
         $budgetResponse = $this->postJson(route('agent.chat'), [
             'message' => 'Prepare a monthly books budget.',
-            'conversation_id' => $conversationId,
-        ])->assertOk()
-            ->assertJsonPath('pending_actions.0.name', 'create_budget');
+            'conversation_id' => $goalResponse->json('conversation_id'),
+        ])->assertOk()->assertJsonPath('pending_actions.0.name', 'create_budget');
 
         $this->postJson(route('agent.cancel'), [
-            'conversation_id' => $conversationId,
+            'conversation_id' => $goalResponse->json('conversation_id'),
             'pending_action_id' => $budgetResponse->json('pending_actions.0.id'),
             'discarded' => true,
         ])->assertOk();
-
         $this->assertDatabaseCount('budgets', 0);
         $this->assertDatabaseHas('agent_pending_actions', [
             'id' => $budgetResponse->json('pending_actions.0.id'),
             'status' => 'cancelled',
         ]);
+        $this->getJson(route('agent.history', $goalResponse->json('conversation_id')))
+            ->assertOk()
+            ->assertJsonPath('messages.3.tool_result.0.result.pending_action.status', 'cancelled');
     }
 
     public function test_history_route_is_scoped_to_the_authenticated_user(): void
@@ -716,71 +1155,47 @@ class AgentToolTest extends TestCase
         $this->assertDatabaseCount('agent_audit_logs', 0);
     }
 
-    public function test_budget_and_saved_plan_writes_are_also_confirmation_gated(): void
+    public function test_budget_and_saved_plan_writes_are_confirmation_gated_and_single_use(): void
     {
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Budget plan']);
         $registry = app(AgentToolRegistry::class);
+        $prepared = $registry->execute($user, 'create_budget', [
+            'category' => 'Books',
+            'amount' => '250.00',
+            'currency' => 'USD',
+        ], $conversation);
 
-        foreach ([
-            ['create_budget', ['category' => 'Books', 'amount' => '250.00', 'currency' => 'USD']],
-            ['save_plan', ['title' => 'Review tuition', 'summary' => 'Set aside funds monthly and revisit the estimate.']],
-        ] as [$name, $arguments]) {
-            $prepared = $registry->execute($user, $name, $arguments, $conversation);
+        $this->assertTrue($prepared['confirmation_required']);
+        $this->assertDatabaseCount('budgets', 0);
 
-            $this->assertTrue($prepared['confirmation_required']);
-            $this->assertSame($name, $prepared['pending_action']['name']);
+        $saved = $registry->confirm($user, $conversation, (int) $prepared['pending_action']['id']);
 
-            if ($name === 'create_budget') {
-                $this->assertDatabaseCount('budgets', 0);
-            } else {
-                $this->assertDatabaseCount('financial_plans', 0);
-            }
-
-            $saved = $registry->confirm($user, $conversation, (int) $prepared['pending_action']['id']);
-            $this->assertTrue($saved['saved']);
-        }
-
+        $this->assertTrue($saved['saved']);
         $this->assertDatabaseHas('budgets', ['user_id' => $user->id, 'category' => 'Books']);
-        $this->assertDatabaseHas('financial_plans', ['user_id' => $user->id, 'title' => 'Review tuition']);
-        $this->assertDatabaseCount('agent_pending_actions', 2);
-    }
-
-    public function test_agent_confirmation_requires_an_unexpired_user_owned_pending_action(): void
-    {
-        $user = User::factory()->create();
-        $other = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Pending']);
-        $otherConversation = $other->agentConversations()->create(['title' => 'Other']);
-        $registry = app(AgentToolRegistry::class);
-        $prepared = $registry->execute($user, 'save_plan', [
-            'title' => 'My plan',
-            'summary' => 'Check the monthly budget before changing contributions.',
-        ], $conversation);
-        $pendingId = (int) $prepared['pending_action']['id'];
-
-        $this->expectException(ModelNotFoundException::class);
-        $registry->confirm($other, $otherConversation, $pendingId);
-    }
-
-    public function test_confirmed_pending_action_cannot_be_replayed(): void
-    {
-        $user = User::factory()->create();
-        $conversation = $user->agentConversations()->create(['title' => 'Single use']);
-        $registry = app(AgentToolRegistry::class);
-        $prepared = $registry->execute($user, 'save_plan', [
-            'title' => 'One plan',
-            'summary' => 'Keep the plan within the existing monthly budget.',
-        ], $conversation);
-        $pendingId = (int) $prepared['pending_action']['id'];
-
-        $registry->confirm($user, $conversation, $pendingId);
-
         $this->expectException(InvalidArgumentException::class);
-        $registry->confirm($user, $conversation, $pendingId);
+        $registry->confirm($user, $conversation, (int) $prepared['pending_action']['id']);
     }
 
-    public function test_user_can_discard_a_pending_action_and_it_cannot_later_be_confirmed(): void
+    public function test_saved_plan_is_not_written_until_the_user_confirms_it(): void
+    {
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Planning note']);
+        $registry = app(AgentToolRegistry::class);
+        $prepared = $registry->execute($user, 'save_plan', [
+            'title' => 'Review tuition',
+            'summary' => 'Set aside funds monthly and revisit the estimate.',
+        ], $conversation);
+
+        $this->assertTrue($prepared['confirmation_required']);
+        $this->assertDatabaseCount('financial_plans', 0);
+
+        $registry->confirm($user, $conversation, (int) $prepared['pending_action']['id']);
+
+        $this->assertDatabaseHas('financial_plans', ['user_id' => $user->id, 'title' => 'Review tuition']);
+    }
+
+    public function test_user_can_discard_a_pending_action_without_saving_it(): void
     {
         $user = User::factory()->create();
         $conversation = $user->agentConversations()->create(['title' => 'Discard']);
@@ -789,15 +1204,20 @@ class AgentToolTest extends TestCase
             'title' => 'Maybe later',
             'summary' => 'Review this planning note before saving it.',
         ], $conversation);
-        $pendingId = (int) $prepared['pending_action']['id'];
+        $pendingActionId = (int) $prepared['pending_action']['id'];
 
-        $registry->cancel($user, $conversation, $pendingId);
+        $registry->cancel($user, $conversation, $pendingActionId);
 
-        $this->assertDatabaseHas('agent_pending_actions', ['id' => $pendingId, 'status' => 'cancelled']);
+        $this->assertDatabaseHas('agent_pending_actions', ['id' => $pendingActionId, 'status' => 'cancelled']);
         $this->assertDatabaseHas('agent_audit_logs', ['user_id' => $user->id, 'status' => 'cancelled']);
         $this->assertDatabaseCount('financial_plans', 0);
-        $this->expectException(InvalidArgumentException::class);
-        $registry->confirm($user, $conversation, $pendingId);
+        try {
+            $registry->confirm($user, $conversation, $pendingActionId);
+            $this->fail('A cancelled action must not be confirmed.');
+        } catch (InvalidArgumentException) {
+            $this->assertDatabaseHas('agent_pending_actions', ['id' => $pendingActionId, 'status' => 'cancelled']);
+            $this->assertDatabaseCount('financial_plans', 0);
+        }
     }
 
     public function test_expired_confirmation_is_rejected_without_saving_a_plan(): void
@@ -809,10 +1229,58 @@ class AgentToolTest extends TestCase
             'title' => 'Expired plan',
             'summary' => 'Review this plan before the deadline.',
         ], $conversation);
-        $pendingId = (int) $prepared['pending_action']['id'];
-        $user->agentPendingActions()->whereKey($pendingId)->update(['expires_at' => now()->subSecond()]);
+        $pendingActionId = (int) $prepared['pending_action']['id'];
+        $user->agentPendingActions()->whereKey($pendingActionId)->update(['expires_at' => now()->subSecond()]);
 
-        $this->expectException(InvalidArgumentException::class);
-        $registry->confirm($user, $conversation, $pendingId);
+        try {
+            $registry->confirm($user, $conversation, $pendingActionId);
+            $this->fail('An expired action must not be confirmed.');
+        } catch (InvalidArgumentException) {
+            $this->assertDatabaseHas('agent_pending_actions', ['id' => $pendingActionId, 'status' => 'expired']);
+            $this->assertDatabaseHas('agent_audit_logs', ['user_id' => $user->id, 'status' => 'expired']);
+            $this->assertDatabaseCount('financial_plans', 0);
+        }
+    }
+
+    /**
+     * @return array{choices: list<array{message: array{role: string, content: string, tool_calls?: list<array<string, mixed>>}}>}
+     */
+    private function textResponse(string $content): array
+    {
+        return ['choices' => [['message' => ['role' => 'assistant', 'content' => $content]]]];
+    }
+
+    /**
+     * @param  array<string, mixed>  $arguments
+     * @return array{choices: list<array{message: array{role: string, content: null, tool_calls: list<array<string, mixed>>}}>}
+     */
+    private function toolResponse(string $name, array $arguments, string $callId): array
+    {
+        return [
+            'choices' => [[
+                'finish_reason' => 'tool_calls',
+                'message' => [
+                    'role' => 'assistant',
+                    'content' => null,
+                    'tool_calls' => [$this->toolCall($name, $arguments, $callId)],
+                ],
+            ]],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $arguments
+     * @return array{ id: string, type: string, function: array{name: string, arguments: string}}
+     */
+    private function toolCall(string $name, array $arguments, string $callId): array
+    {
+        return [
+            'id' => $callId,
+            'type' => 'function',
+            'function' => [
+                'name' => $name,
+                'arguments' => json_encode($arguments, JSON_THROW_ON_ERROR),
+            ],
+        ];
     }
 }

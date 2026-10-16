@@ -4,8 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\AgentConversation;
 use App\Services\AgentToolRegistry;
-use App\Services\GeminiAgent;
-use App\Services\GeminiProviderException;
+use App\Services\OpenRouterAgent;
+use App\Services\OpenRouterProviderException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
@@ -23,7 +23,7 @@ class AgentController extends Controller
         ]);
     }
 
-    public function chat(Request $request, GeminiAgent $agent): JsonResponse
+    public function chat(Request $request, OpenRouterAgent $agent): JsonResponse
     {
         $data = $request->validate([
             'message' => ['required', 'string', 'max:4000'],
@@ -47,7 +47,7 @@ class AgentController extends Controller
 
         try {
             $result = $agent->respond($user, $conversation, $data['message']);
-        } catch (GeminiProviderException $exception) {
+        } catch (OpenRouterProviderException $exception) {
             $conversation->messages()->create([
                 'user_id' => $user->id,
                 'role' => 'assistant',
@@ -60,19 +60,6 @@ class AgentController extends Controller
                 'message' => $exception->getMessage(),
                 'conversation_id' => $conversation->id,
             ], $exception->httpStatus);
-        } catch (\RuntimeException $exception) {
-            $conversation->messages()->create([
-                'user_id' => $user->id,
-                'role' => 'assistant',
-                'content' => $exception->getMessage(),
-                'tool_result' => [['error' => true]],
-            ]);
-            $conversation->touch();
-
-            return response()->json([
-                'message' => $exception->getMessage(),
-                'conversation_id' => $conversation->id,
-            ], 503);
         }
 
         $conversation->messages()->create([

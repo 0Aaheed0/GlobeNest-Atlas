@@ -35,4 +35,21 @@ class ExchangeRateService
     {
         return array_keys(self::DEMO_RATES_MICROS_PER_USD);
     }
+
+    /**
+     * @return array<string, string>
+     */
+    public function currencyNames(): array
+    {
+        return [
+            'USD' => 'United States dollar',
+            'EUR' => 'Euro',
+            'GBP' => 'British pound sterling',
+            'CAD' => 'Canadian dollar',
+            'AUD' => 'Australian dollar',
+            'CNY' => 'Chinese yuan',
+            'INR' => 'Indian rupee',
+            'BDT' => 'Bangladeshi taka',
+        ];
+    }
 }
