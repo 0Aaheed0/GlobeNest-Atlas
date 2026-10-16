@@ -24,6 +24,8 @@ class AgentToolTest extends TestCase
 
     private const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
+    private const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -380,7 +382,142 @@ class AgentToolTest extends TestCase
         Http::assertSent(fn (Request $request): bool => collect($request['messages'] ?? [])
             ->contains(fn (array $message): bool => ($message['role'] ?? null) === 'tool'
                 && ($message['tool_call_id'] ?? null) === 'call_summary'
+                && ($message['name'] ?? null) === 'get_financial_summary'
                 && str_contains((string) ($message['content'] ?? ''), 'home_currency')));
+    }
+
+    public function test_groq_uses_the_existing_tool_loop_and_returns_a_natural_language_follow_up(): void
+    {
+        Config::set('services.ai.provider', 'groq');
+        Config::set('services.groq.key', 'private-groq-test-key');
+        Config::set('services.groq.model', 'openai/gpt-oss-120b');
+        Http::preventStrayRequests();
+        Http::fake([
+            'https://api.groq.com/openai/v1/chat/completions' => Http::sequence()
+                ->push($this->toolResponse('get_financial_summary', [], 'call_summary'))
+                ->push($this->textResponse('Your overview is ready.')),
+        ]);
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1800.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Groq overview']);
+        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'Show my overview']);
+
+        $result = app(OpenRouterAgent::class)->respond($user, $conversation, 'Show my overview');
+
+        $this->assertSame('Your overview is ready.', $result['text']);
+        $this->assertSame('USD', $result['tool_results'][0]['result']['profile']['home_currency']);
+        $this->assertSame(2, Http::recorded()->count());
+        Http::assertSent(fn (Request $request): bool => $request->url() === 'https://api.groq.com/openai/v1/chat/completions'
+            && $request['tool_choice'] === 'auto'
+            && count($request['tools']) === 11
+            && $request['max_completion_tokens'] === 900
+            && ! array_key_exists('max_tokens', $request->data())
+            && collect($request['messages'] ?? [])->contains(fn (array $message): bool => ($message['role'] ?? null) === 'tool'
+                && ($message['tool_call_id'] ?? null) === 'call_summary'
+                && ($message['name'] ?? null) === 'get_financial_summary'
+                && str_contains((string) ($message['content'] ?? ''), 'home_currency')));
+    }
+
+    public function test_groq_planning_changes_still_require_explicit_server_side_confirmation(): void
+    {
+        Config::set('services.ai.provider', 'groq');
+        Config::set('services.groq.key', 'private-groq-test-key');
+        Config::set('services.groq.model', 'openai/gpt-oss-120b');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::GROQ_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_savings_goal', [
+                    'title' => 'Synthetic reserve',
+                    'target_amount' => '400.00',
+                    'currency' => 'USD',
+                ], 'call_goal'))
+                ->push($this->textResponse('Review this proposal before saving.')),
+        ]);
+        $user = User::factory()->create();
+
+        $response = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Prepare a synthetic savings goal.',
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'create_savings_goal')
+            ->assertJsonPath('text', "Review this proposal before saving.\n\nNo planning changes were saved. Review each draft and confirm it, or choose Not now.");
+
+        $this->assertDatabaseCount('savings_goals', 0);
+        $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $response->json('conversation_id'),
+            'pending_action_id' => $response->json('pending_actions.0.id'),
+            'confirmed' => true,
+        ])->assertOk()->assertJsonPath('saved.saved', true);
+        $this->assertDatabaseHas('savings_goals', [
+            'user_id' => $user->id,
+            'title' => 'Synthetic reserve',
+            'target_amount' => '400.00',
+        ]);
+    }
+
+    public function test_chat_and_history_show_tool_summaries_without_exposing_raw_tool_results(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('get_financial_summary', [], 'call_summary'))
+                ->push($this->textResponse('Your overview is ready.')),
+        ]);
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1800.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+
+        $response = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Show my overview',
+        ])->assertOk()
+            ->assertJsonPath('text', 'Your overview is ready.')
+            ->assertJsonPath('tool_results.0.name', 'get_financial_summary')
+            ->assertJsonPath('tool_results.0.summary', 'Your financial overview is ready for Atlas’s explanation.')
+            ->assertJsonMissingPath('tool_results.0.result')
+            ->assertJsonMissingPath('tool_results.0.arguments')
+            ->assertDontSee('1800.00');
+
+        $conversationId = $response->json('conversation_id');
+        $assistantMessage = $user->agentConversations()->findOrFail($conversationId)
+            ->messages()
+            ->where('role', 'assistant')
+            ->firstOrFail();
+
+        $this->assertSame('USD', data_get($assistantMessage->tool_result, '0.result.profile.home_currency'));
+
+        $this->actingAs($user)->getJson(route('agent.history', $conversationId))
+            ->assertOk()
+            ->assertJsonPath('messages.1.tool_result.0.name', 'get_financial_summary')
+            ->assertJsonPath('messages.1.tool_result.0.summary', 'Your financial overview is ready for Atlas’s explanation.')
+            ->assertJsonMissingPath('messages.1.tool_result.0.result')
+            ->assertJsonMissingPath('messages.1.tool_result.0.arguments');
+
+        $page = $this->actingAs($user)
+            ->get(route('dashboard', ['conversation_id' => $conversationId]))
+            ->assertOk();
+        preg_match('/data-display-tool-results="([^"]*)"/', $page->getContent(), $matches);
+        $displayResults = json_decode(
+            html_entity_decode($matches[1] ?? '', ENT_QUOTES | ENT_HTML5),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+
+        $this->assertSame('Your financial overview is ready for Atlas’s explanation.', $displayResults[0]['summary']);
+        $this->assertArrayNotHasKey('result', $displayResults[0]);
     }
 
     public function test_openrouter_can_execute_different_tools_across_multiple_bounded_rounds(): void
@@ -868,7 +1005,7 @@ class AgentToolTest extends TestCase
 
         $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Help me plan'])
             ->assertStatus(502)
-            ->assertJsonPath('message', 'OpenRouter returned a response without readable assistant content.');
+            ->assertJsonPath('message', 'The AI provider returned a response without readable assistant content.');
     }
 
     public function test_chat_maps_provider_failures_and_timeouts_to_safe_messages(): void
@@ -897,6 +1034,28 @@ class AgentToolTest extends TestCase
 
         $timeoutResponse->assertStatus(504)
             ->assertJsonPath('message', 'OpenRouter did not respond before the request timed out. Try again later.');
+    }
+
+    public function test_groq_provider_failure_is_returned_safely_by_the_chat_endpoint(): void
+    {
+        Config::set('services.ai.provider', 'groq');
+        Config::set('services.groq.key', 'private-groq-test-key');
+        Config::set('services.groq.model', 'openai/gpt-oss-120b');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::GROQ_ENDPOINT => Http::response([
+                'error' => ['message' => 'Sensitive provider account details'],
+            ], 429, ['Retry-After' => '30']),
+        ]);
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->postJson(route('agent.chat'), ['message' => 'Help me with a synthetic question'])
+            ->assertTooManyRequests()
+            ->assertJsonPath('message', 'Groq rate limits or organization quota are preventing Atlas AI from responding. Try again later.')
+            ->assertDontSee('Sensitive provider account details')
+            ->assertDontSee('private-groq-test-key');
+
+        $this->assertSame(1, Http::recorded()->count());
     }
 
     public function test_openrouter_connection_command_makes_a_minimal_backend_request_without_printing_the_key(): void
@@ -1034,6 +1193,29 @@ class AgentToolTest extends TestCase
             ->assertFailed();
     }
 
+    public function test_openrouter_free_model_daily_limit_is_reported_as_an_account_limit_without_retrying(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Config::set('services.openrouter.model', 'cohere/north-mini-code:free');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response([
+                'error' => [
+                    'code' => 429,
+                    'message' => 'Rate limit exceeded: free-models-per-day. Add credits to increase the daily free-model request quota.',
+                ],
+            ], 429),
+        ]);
+
+        $this->artisan('openrouter:test')
+            ->expectsOutput('OpenRouter account limits are preventing Atlas AI from responding. Check your account usage and credits.')
+            ->expectsOutput('Rate limit source: OpenRouter account or usage limits.')
+            ->doesntExpectOutput('test-key')
+            ->assertFailed();
+
+        $this->assertSame(1, Http::recorded()->count());
+    }
+
     public function test_openrouter_connection_command_requires_a_fixed_model_configuration(): void
     {
         Config::set('services.openrouter.key', 'test-key');
@@ -1056,6 +1238,20 @@ class AgentToolTest extends TestCase
             ->assertOk()
             ->assertSee('Key configured · connection not verified')
             ->assertDontSee('private-test-key');
+    }
+
+    public function test_groq_provider_status_uses_its_model_and_never_renders_its_api_key(): void
+    {
+        Config::set('services.ai.provider', 'groq');
+        Config::set('services.groq.key', 'private-groq-test-key');
+        Config::set('services.groq.model', 'openai/gpt-oss-120b');
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('ATLAS AI · Groq · openai/gpt-oss-120b')
+            ->assertSee('Key configured · connection not verified')
+            ->assertDontSee('private-groq-test-key');
     }
 
     public function test_chat_requires_authentication_valid_input_and_a_user_owned_conversation(): void
@@ -1102,7 +1298,10 @@ class AgentToolTest extends TestCase
             'message' => 'Prepare an emergency savings goal.',
         ])->assertOk()
             ->assertJsonPath('text', "Review this goal before saving.\n\nNo planning changes were saved. Review each draft and confirm it, or choose Not now.")
-            ->assertJsonPath('pending_actions.0.name', 'create_savings_goal');
+            ->assertJsonPath('pending_actions.0.name', 'create_savings_goal')
+            ->assertJsonPath('tool_results.0.summary', 'A proposed planning change is ready for your review. Nothing has been saved.')
+            ->assertJsonPath('tool_results.0.pending_action.name', 'create_savings_goal')
+            ->assertJsonMissingPath('tool_results.0.result');
 
         $this->assertDatabaseCount('savings_goals', 0);
         $this->postJson(route('agent.confirm'), [
@@ -1119,8 +1318,8 @@ class AgentToolTest extends TestCase
         ]);
         $this->getJson(route('agent.history', $goalResponse->json('conversation_id')))
             ->assertOk()
-            ->assertJsonPath('messages.1.tool_result.0.result.pending_action.status', 'confirmed')
-            ->assertJsonPath('messages.1.tool_result.0.result.pending_action.outcome.target_amount', '1200.00');
+            ->assertJsonPath('messages.1.tool_result.0.pending_action.status', 'confirmed')
+            ->assertJsonPath('messages.1.tool_result.0.pending_action.outcome.target_amount', '1200.00');
 
         $budgetResponse = $this->postJson(route('agent.chat'), [
             'message' => 'Prepare a monthly books budget.',
@@ -1139,7 +1338,7 @@ class AgentToolTest extends TestCase
         ]);
         $this->getJson(route('agent.history', $goalResponse->json('conversation_id')))
             ->assertOk()
-            ->assertJsonPath('messages.3.tool_result.0.result.pending_action.status', 'cancelled');
+            ->assertJsonPath('messages.3.tool_result.0.pending_action.status', 'cancelled');
     }
 
     public function test_history_route_is_scoped_to_the_authenticated_user(): void

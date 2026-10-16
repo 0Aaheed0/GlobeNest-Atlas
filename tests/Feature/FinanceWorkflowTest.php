@@ -23,6 +23,7 @@ class FinanceWorkflowTest extends TestCase
     public function test_dashboard_requires_authentication_and_registration_starts_onboarding(): void
     {
         $this->get('/app')->assertRedirect(route('login'));
+        $sessionIdBeforeRegistration = session()->getId();
 
         $this->post(route('register.store'), [
             'name' => 'Student One',
@@ -32,17 +33,22 @@ class FinanceWorkflowTest extends TestCase
         ])->assertRedirect(route('dashboard'));
 
         $this->assertAuthenticated();
+        $this->assertNotSame($sessionIdBeforeRegistration, session()->getId());
         $registeredUser = User::where('email', 'student@example.test')->firstOrFail();
         $this->assertNotSame('very-secure-password', $registeredUser->password);
         $this->assertTrue(Hash::check('very-secure-password', $registeredUser->password));
         $this->get(route('dashboard'))->assertOk()->assertSee('Welcome to your financial map.');
+        $sessionIdBeforeLogout = session()->getId();
         $this->post(route('logout'))->assertRedirect(route('home'));
         $this->assertGuest();
+        $this->assertNotSame($sessionIdBeforeLogout, session()->getId());
+        $sessionIdBeforeLogin = session()->getId();
         $this->post(route('login.store'), [
             'email' => 'student@example.test',
             'password' => 'very-secure-password',
         ])->assertRedirect(route('dashboard'));
         $this->assertAuthenticated();
+        $this->assertNotSame($sessionIdBeforeLogin, session()->getId());
     }
 
     public function test_invalid_login_is_rejected_and_repeated_attempts_are_rate_limited(): void
@@ -147,6 +153,38 @@ class FinanceWorkflowTest extends TestCase
             ->assertSee('800.00');
     }
 
+    public function test_dashboard_escapes_user_controlled_financial_and_conversation_text(): void
+    {
+        $user = User::factory()->create();
+        $payload = '<script>alert(1)</script>';
+        $user->savingsGoals()->create([
+            'title' => $payload,
+            'target_amount' => '500.00',
+            'current_amount' => '0.00',
+            'currency' => 'USD',
+        ]);
+        $user->transactions()->create([
+            'kind' => 'expense',
+            'category' => 'Housing',
+            'description' => $payload,
+            'amount' => '100.00',
+            'currency' => 'USD',
+            'occurred_on' => today(),
+            'is_simulated' => false,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Escaping check']);
+        $conversation->messages()->create([
+            'user_id' => $user->id,
+            'role' => 'user',
+            'content' => $payload,
+        ]);
+
+        $this->actingAs($user)->get(route('dashboard', ['conversation_id' => $conversation->id]))
+            ->assertOk()
+            ->assertSee('&lt;script&gt;alert(1)&lt;/script&gt;', false)
+            ->assertDontSee($payload, false);
+    }
+
     public function test_dashboard_derives_financial_warnings_from_owned_records_and_restores_pending_approvals(): void
     {
         $user = User::factory()->create();
@@ -215,7 +253,7 @@ class FinanceWorkflowTest extends TestCase
             ->assertSee('Upcoming tuition is due soon')
             ->assertSee('Pending approvals')
             ->assertSee('Emergency fund')
-            ->assertSee('data-tool-results')
+            ->assertSee('data-display-tool-results')
             ->assertSee('Confirm and save')
             ->assertDontSee('Other account overdue tuition');
     }
@@ -332,6 +370,12 @@ class FinanceWorkflowTest extends TestCase
             'due_date' => today()->addMonths(4),
             'installments' => 1,
         ]);
+        $foreignGoal = $other->savingsGoals()->create([
+            'title' => 'Private goal',
+            'target_amount' => '500.00',
+            'current_amount' => '0.00',
+            'currency' => 'USD',
+        ]);
 
         $this->actingAs($user)->post(route('tuition.progress', $tuition), [
             'additional_amount' => '300.00',
@@ -351,6 +395,14 @@ class FinanceWorkflowTest extends TestCase
         $this->actingAs($user)->post(route('tuition.progress', $foreignTuition), [
             'additional_amount' => '100.00',
         ])->assertNotFound();
+        $this->actingAs($user)->post(route('goals.progress', $foreignGoal), [
+            'additional_amount' => '100.00',
+        ])->assertNotFound();
+        $this->assertDatabaseHas('savings_goals', [
+            'id' => $foreignGoal->id,
+            'user_id' => $other->id,
+            'current_amount' => '0.00',
+        ]);
     }
 
     public function test_funding_opportunities_are_user_entered_validated_and_owner_scoped(): void
@@ -540,6 +592,15 @@ class FinanceWorkflowTest extends TestCase
             'pending_action_id' => $foreignAction->id,
             'confirmed' => true,
         ])->assertNotFound();
+        $this->actingAs($user)->postJson(route('agent.cancel'), [
+            'conversation_id' => $conversation->id,
+            'pending_action_id' => $foreignAction->id,
+            'discarded' => true,
+        ])->assertNotFound();
+        $this->assertDatabaseHas('agent_pending_actions', [
+            'id' => $foreignAction->id,
+            'status' => 'pending',
+        ]);
 
         $this->actingAs($user)->postJson(route('agent.confirm'), [
             'conversation_id' => $conversation->id,

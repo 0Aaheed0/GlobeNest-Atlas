@@ -3,9 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\AgentConversation;
+use App\Models\AgentMessage;
+use App\Services\AgentToolDisplayPresenter;
 use App\Services\AgentToolRegistry;
+use App\Services\ChatCompletionProviderException;
 use App\Services\OpenRouterAgent;
-use App\Services\OpenRouterProviderException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
@@ -13,17 +15,22 @@ use Illuminate\Validation\ValidationException;
 
 class AgentController extends Controller
 {
-    public function history(Request $request, AgentConversation $conversation): JsonResponse
+    public function history(Request $request, AgentConversation $conversation, AgentToolDisplayPresenter $presenter): JsonResponse
     {
         $ownedConversation = $request->user()->agentConversations()->whereKey($conversation->id)->firstOrFail();
 
         return response()->json([
             'conversation_id' => $ownedConversation->id,
-            'messages' => $ownedConversation->messages()->orderBy('id')->get(['role', 'content', 'tool_result']),
+            'messages' => $ownedConversation->messages()->orderBy('id')->get(['role', 'content', 'tool_result'])
+                ->map(fn (AgentMessage $message): array => [
+                    'role' => $message->role,
+                    'content' => $message->content,
+                    'tool_result' => $presenter->presentResults($message->tool_result ?? []),
+                ]),
         ]);
     }
 
-    public function chat(Request $request, OpenRouterAgent $agent): JsonResponse
+    public function chat(Request $request, OpenRouterAgent $agent, AgentToolDisplayPresenter $presenter): JsonResponse
     {
         $data = $request->validate([
             'message' => ['required', 'string', 'max:4000'],
@@ -47,7 +54,7 @@ class AgentController extends Controller
 
         try {
             $result = $agent->respond($user, $conversation, $data['message']);
-        } catch (OpenRouterProviderException $exception) {
+        } catch (ChatCompletionProviderException $exception) {
             $conversation->messages()->create([
                 'user_id' => $user->id,
                 'role' => 'assistant',
@@ -73,8 +80,8 @@ class AgentController extends Controller
         return response()->json([
             'text' => $result['text'],
             'conversation_id' => $conversation->id,
-            'tool_results' => $result['tool_results'],
-            'pending_actions' => $result['pending_actions'],
+            'tool_results' => $presenter->presentResults($result['tool_results']),
+            'pending_actions' => $presenter->presentActions($result['pending_actions']),
         ]);
     }
 

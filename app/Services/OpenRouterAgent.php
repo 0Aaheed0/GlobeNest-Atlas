@@ -57,7 +57,7 @@ class OpenRouterAgent
             $assistantMessage = $response['choices'][0]['message'] ?? null;
 
             if (! is_array($assistantMessage)) {
-                throw new OpenRouterProviderException('OpenRouter returned a response without an assistant message.', 502);
+                throw new ChatCompletionProviderException('The AI provider returned a response without an assistant message.', 502);
             }
 
             $content = $assistantMessage['content'] ?? null;
@@ -68,7 +68,7 @@ class OpenRouterAgent
 
             if ($toolCalls === []) {
                 if (trim($text) === '') {
-                    throw new OpenRouterProviderException('OpenRouter returned a response without readable assistant content.', 502);
+                    throw new ChatCompletionProviderException('The AI provider returned a response without readable assistant content.', 502);
                 }
 
                 if ($pendingActions !== []) {
@@ -106,7 +106,7 @@ class OpenRouterAgent
 
             foreach ($toolCalls as $toolCall) {
                 if (! is_array($toolCall)) {
-                    throw new OpenRouterProviderException('OpenRouter returned an invalid tool call.', 502);
+                    throw new ChatCompletionProviderException('The AI provider returned an invalid tool call.', 502);
                 }
 
                 $callId = is_string($toolCall['id'] ?? null) ? $toolCall['id'] : '';
@@ -116,7 +116,7 @@ class OpenRouterAgent
                 $fingerprint = hash('sha256', $name."\0".json_encode($arguments, JSON_THROW_ON_ERROR));
 
                 if ($callId === '') {
-                    throw new OpenRouterProviderException('OpenRouter returned a tool call without a valid identifier.', 502);
+                    throw new ChatCompletionProviderException('The AI provider returned a tool call without a valid identifier.', 502);
                 }
 
                 if (isset($seenToolCalls[$fingerprint])) {
@@ -145,6 +145,7 @@ class OpenRouterAgent
                 $messages[] = [
                     'role' => 'tool',
                     'tool_call_id' => $callId,
+                    'name' => $name,
                     'content' => json_encode($this->normalizeProviderResult($result), JSON_THROW_ON_ERROR),
                 ];
             }

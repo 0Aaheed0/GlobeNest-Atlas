@@ -41,4 +41,14 @@ return [
         'timeout' => (int) env('OPENROUTER_TIMEOUT', 25),
     ],
 
+    'ai' => [
+        'provider' => env('AI_PROVIDER', 'openrouter'),
+    ],
+
+    'groq' => [
+        'key' => env('GROQ_API_KEY'),
+        'model' => env('GROQ_MODEL', 'openai/gpt-oss-120b'),
+        'timeout' => (int) env('GROQ_TIMEOUT', 25),
+    ],
+
 ];

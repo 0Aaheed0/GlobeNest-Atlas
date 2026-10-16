@@ -2,11 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AgentMessage;
 use App\Models\Budget;
 use App\Models\FundingOpportunity;
 use App\Models\SavingsGoal;
 use App\Models\TuitionPlan;
 use App\Models\User;
+use App\Services\AgentToolDisplayPresenter;
 use App\Services\CurrencyCalculator;
 use App\Services\ExchangeRateService;
 use App\Services\FinancialPlanner;
@@ -25,7 +27,7 @@ class FinanceController extends Controller
         return view('landing');
     }
 
-    public function dashboard(Request $request, FinancialPlanner $planner): View
+    public function dashboard(Request $request, FinancialPlanner $planner, AgentToolDisplayPresenter $toolPresenter): View
     {
         /** @var User $user */
         $user = $request->user();
@@ -94,6 +96,21 @@ class FinanceController extends Controller
         $selectedConversation = $conversationId
             ? $user->agentConversations()->with(['messages' => fn ($query) => $query->orderBy('id')])->find($conversationId)
             : null;
+        $aiProvider = config('services.ai.provider') ?? 'openrouter';
+        $aiProviderSupported = in_array($aiProvider, ['openrouter', 'groq'], true);
+        $aiProviderConfig = $aiProviderSupported ? config('services.'.$aiProvider, []) : [];
+        $aiModel = is_array($aiProviderConfig) ? ($aiProviderConfig['model'] ?? null) : null;
+        $aiKeyConfigured = is_array($aiProviderConfig) && is_string($aiProviderConfig['key'] ?? null)
+            && trim($aiProviderConfig['key']) !== '';
+        $aiProviderNeedsFixedModel = $aiProvider === 'openrouter'
+            && in_array(strtolower((string) $aiModel), ['openrouter/free', 'openrouter/auto'], true);
+
+        if ($selectedConversation !== null) {
+            $selectedConversation->messages->each(function (AgentMessage $message) use ($toolPresenter): void {
+                $message->setAttribute('display_tool_result', $toolPresenter->presentResults($message->tool_result ?? []));
+            });
+        }
+
         $monthlyBudgets = $user->budgets()
             ->whereDate('period_start', '<=', today())
             ->whereDate('period_end', '>=', today())
@@ -209,6 +226,15 @@ class FinanceController extends Controller
             ])->values(),
             'categoryBreakdown' => $categoryCards,
             'filter' => $filter,
+            'aiProviderName' => match ($aiProvider) {
+                'openrouter' => 'OpenRouter',
+                'groq' => 'Groq',
+                default => 'Unsupported provider',
+            },
+            'aiModel' => is_string($aiModel) && $aiModel !== '' ? $aiModel : '(model not configured)',
+            'aiKeyConfigured' => $aiKeyConfigured,
+            'aiProviderNeedsFixedModel' => $aiProviderNeedsFixedModel,
+            'aiProviderSupported' => $aiProviderSupported,
             'currencies' => app(ExchangeRateService::class)->currencies(),
             'currencyNames' => app(ExchangeRateService::class)->currencyNames(),
             'selectedConversation' => $selectedConversation,

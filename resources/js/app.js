@@ -375,9 +375,9 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
         }
         insertionPoint = card;
     };
-    results.filter((entry) => entry && typeof entry.name === 'string' && entry.result && typeof entry.result === 'object').forEach(({ name, result }) => {
+    results.filter((entry) => entry && typeof entry.name === 'string' && typeof entry.summary === 'string').forEach((entry) => {
         const card = makeElement('div', 'tool-result-card');
-        const action = result.pending_action;
+        const action = entry.pending_action;
         if (action) {
             const statusTitle = action.status === 'confirmed'
                 ? 'Change saved to your account'
@@ -393,11 +393,8 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
                 card.append(makeElement('p', 'result-detail', describeSavedOutcome(action.outcome)));
             }
         } else {
-            card.append(makeElement('b', '', `Atlas calculation · ${String(name).replaceAll('_', ' ')}`));
-            const detail = makeElement('details', 'tool-result-details');
-            detail.append(makeElement('summary', '', 'Review calculation details'));
-            detail.append(makeElement('pre', '', JSON.stringify(result, null, 2)));
-            card.append(detail);
+            card.append(makeElement('b', '', 'Atlas calculation'));
+            card.append(makeElement('p', 'result-detail', entry.summary));
         }
         if (canConfirm && action && !action.status) {
             const confirmButton = makeElement('button', 'button button-primary', 'Confirm and save');
@@ -449,7 +446,7 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
         insertCard(card);
     });
     pendingActions.forEach((action) => {
-        if (!results.some(({ result }) => result.pending_action?.name === action.name)) {
+        if (!results.some((entry) => entry.pending_action?.name === action.name)) {
             const card = makeElement('div', 'tool-result-card');
             card.append(makeElement('b', '', 'Review this proposed change'));
             appendActionSummary(card, action);
@@ -468,9 +465,9 @@ document.querySelectorAll('[data-pending-action]').forEach((summary) => {
     }
 });
 
-document.querySelectorAll('.chat-message[data-tool-results]').forEach((message) => {
+document.querySelectorAll('.chat-message[data-display-tool-results]').forEach((message) => {
     try {
-        addToolResults(JSON.parse(message.dataset.toolResults || '[]'), [], false, message);
+        addToolResults(JSON.parse(message.dataset.displayToolResults || '[]'), [], false, message);
     } catch {
         showToast('Saved tool details could not be displayed. Reload the conversation to try again.', true);
     }
