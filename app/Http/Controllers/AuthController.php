@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use GuzzleHttp\Client;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -49,7 +50,7 @@ class AuthController extends Controller
         $data = $request->validate([
             'name' => ['required', 'string', 'max:100'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
-            'password' => ['required', 'string', 'min:12', 'confirmed'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
         ]);
 
         $code = (string) random_int(100000, 999999);
@@ -162,13 +163,13 @@ class AuthController extends Controller
 
     public function redirectToGoogle(): RedirectResponse
     {
-        return Socialite::driver('google')->redirect();
+        return $this->getGoogleDriver()->redirect();
     }
 
     public function handleGoogleCallback(Request $request): RedirectResponse
     {
         try {
-            $googleUser = Socialite::driver('google')->user();
+            $googleUser = $this->getGoogleDriver()->user();
         } catch (\Throwable $e) {
             Log::warning('Google OAuth failed: '.$e->getMessage());
 
@@ -202,6 +203,20 @@ class AuthController extends Controller
         $request->session()->regenerate();
 
         return redirect()->intended(route('dashboard'));
+    }
+
+    protected function getGoogleDriver()
+    {
+        $driver = Socialite::driver('google');
+
+        if (method_exists($driver, 'setHttpClient') && is_file(base_path('certs/cacert.pem'))) {
+            $driver->setHttpClient(new Client([
+                'verify' => base_path('certs/cacert.pem'),
+                'timeout' => 25,
+            ]));
+        }
+
+        return $driver;
     }
 
     public function logout(Request $request): RedirectResponse

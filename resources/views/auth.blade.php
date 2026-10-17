@@ -118,7 +118,7 @@
                             @endif
                         </span>
                         <div class="password-input-wrap">
-                            <input id="auth-password" name="password" type="password" autocomplete="{{ $mode === 'login' ? 'current-password' : 'new-password' }}" placeholder="Enter your password" required minlength="{{ $mode === 'register' ? 12 : 1 }}">
+                            <input id="auth-password" name="password" type="password" autocomplete="{{ $mode === 'login' ? 'current-password' : 'new-password' }}" placeholder="Enter your password" required minlength="{{ $mode === 'register' ? 8 : 1 }}">
                             <button type="button" class="toggle-password-btn" data-toggle-password="auth-password" aria-label="Toggle password visibility">
                                 👁
                             </button>
@@ -127,9 +127,9 @@
                     @if ($mode === 'register')
                         <label>
                             <span>Confirm password</span>
-                            <input name="password_confirmation" type="password" autocomplete="new-password" placeholder="Confirm your password" required minlength="12">
+                            <input name="password_confirmation" type="password" autocomplete="new-password" placeholder="Confirm your password" required minlength="8">
                         </label>
-                        <p class="field-hint">Use at least 12 characters. An email confirmation code will be sent to verify your address.</p>
+                        <p class="field-hint">Use at least 8 characters. An email confirmation code will be sent to verify your address.</p>
                     @else
                         <label class="check-row">
                             <input name="remember" type="checkbox" value="1">
