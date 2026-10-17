@@ -65,10 +65,41 @@
                         <a class="button button-quiet" href="#profile-settings">Update profile <span aria-hidden="true">↗</span></a>
                     </section>
                     <section class="metric-grid">
-                        <article class="metric-card metric-primary"><div class="metric-top"><span>AVAILABLE THIS MONTH</span><span class="metric-icon">↗</span></div><div class="metric-value">{{ $profile->home_currency }} {{ $availableFunds }}</div><div class="metric-foot">@if ($overBudget > 0) Over budget by {{ $profile->home_currency }} {{ \App\Services\CurrencyCalculator::formatMinorUnits($overBudget) }} @else {{ $profile->home_currency }} budget less same-currency recorded expenses @endif</div><div class="metric-rule"><i style="width: {{ $budgetUsagePercent }}%"></i></div><div class="metric-foot metric-bottom">Budget {{ $profile->home_currency }} {{ $profile->monthly_budget }} <span>{{ $profile->destination_country }}</span></div></article>
-                        <article class="metric-card"><div class="metric-top"><span>SPENT THIS MONTH</span><span class="metric-icon">⌁</span></div><div class="metric-value">{{ $profile->home_currency }} {{ $monthlySpending }}</div><div class="metric-foot">Recorded expenses in your home currency</div><div class="metric-mini"><span class="mini-dot green"></span> {{ $categoryBreakdown->count() }} spending {{ \Illuminate\Support\Str::plural('category', $categoryBreakdown->count()) }} tracked</div></article>
-                        <article class="metric-card"><div class="metric-top"><span>TUITION PLANS</span><span class="metric-icon">▤</span></div><div class="metric-value">{{ $tuitionPlans->count() }} <small>{{ \Illuminate\Support\Str::plural('plan', $tuitionPlans->count()) }}</small></div><div class="metric-foot">{{ $firstTuition?->due_date?->format('M j, Y') ?? 'Add a tuition deadline to begin' }}</div><a class="metric-link" href="#tuition">View tuition plan <span>→</span></a></article>
-                        <article class="metric-card"><div class="metric-top"><span>SAVINGS GOALS</span><span class="metric-icon">◎</span></div><div class="metric-value">{{ $goals->count() }} <small>{{ \Illuminate\Support\Str::plural('goal', $goals->count()) }}</small></div><div class="metric-foot">{{ $goals->first()['goal']->title ?? 'Small steps, clearly measured' }}</div><a class="metric-link" href="#goals">View savings goals <span>→</span></a></article>
+                        <article class="metric-card metric-primary">
+                            <div>
+                                <div class="metric-top"><span>AVAILABLE THIS MONTH</span><span class="metric-icon">↗</span></div>
+                                <div class="metric-value">{{ $profile->home_currency }} {{ $availableFunds }}</div>
+                                <div class="metric-foot">@if ($overBudget > 0) Over budget by {{ $profile->home_currency }} {{ \App\Services\CurrencyCalculator::formatMinorUnits($overBudget) }} @else {{ $profile->home_currency }} budget less same-currency recorded expenses @endif</div>
+                            </div>
+                            <div>
+                                <div class="metric-rule"><i style="width: {{ $budgetUsagePercent }}%"></i></div>
+                                <div class="metric-foot metric-bottom"><span>Budget {{ $profile->home_currency }} {{ $profile->monthly_budget }}</span> <span>{{ $profile->destination_country }}</span></div>
+                            </div>
+                        </article>
+                        <article class="metric-card">
+                            <div>
+                                <div class="metric-top"><span>SPENT THIS MONTH</span><span class="metric-icon">⌁</span></div>
+                                <div class="metric-value">{{ $profile->home_currency }} {{ $monthlySpending }}</div>
+                                <div class="metric-foot">Recorded expenses in your home currency</div>
+                            </div>
+                            <div class="metric-mini"><span class="mini-dot green"></span> {{ $categoryBreakdown->count() }} spending {{ \Illuminate\Support\Str::plural('category', $categoryBreakdown->count()) }} tracked</div>
+                        </article>
+                        <article class="metric-card">
+                            <div>
+                                <div class="metric-top"><span>TUITION PLANS</span><span class="metric-icon">▤</span></div>
+                                <div class="metric-value">{{ $tuitionPlans->count() }} <small>{{ \Illuminate\Support\Str::plural('plan', $tuitionPlans->count()) }}</small></div>
+                                <div class="metric-foot">{{ $firstTuition?->due_date?->format('M j, Y') ?? 'Add a tuition deadline to begin' }}</div>
+                            </div>
+                            <a class="metric-link" href="#tuition">View tuition plan <span>→</span></a>
+                        </article>
+                        <article class="metric-card">
+                            <div>
+                                <div class="metric-top"><span>SAVINGS GOALS</span><span class="metric-icon">◎</span></div>
+                                <div class="metric-value">{{ $goals->count() }} <small>{{ \Illuminate\Support\Str::plural('goal', $goals->count()) }}</small></div>
+                                <div class="metric-foot">{{ $goals->first()['goal']->title ?? 'Small steps, clearly measured' }}</div>
+                            </div>
+                            <a class="metric-link" href="#goals">View savings goals <span>→</span></a>
+                        </article>
                     </section>
                 @endif
 
@@ -179,8 +210,21 @@
                         @endif
                     </section>
                     <div class="assistant-layout">
-                        <aside class="conversation-rail"><div class="rail-heading"><span>RECENT CONVERSATIONS</span><button type="button" data-new-chat aria-label="Start a new conversation">+</button></div>
-                            @forelse ($conversations as $conversation)<button class="conversation-item {{ $selectedConversation?->id === $conversation->id ? 'selected' : '' }}" type="button" data-load-conversation="{{ $conversation->id }}"><b>{{ \Illuminate\Support\Str::limit($conversation->title, 34) }}</b><small>{{ $conversation->updated_at->diffForHumans() }}</small></button>@empty<p class="conversation-empty">Your saved conversations will appear here.</p>@endforelse
+                        <aside class="conversation-rail">
+                            <div class="rail-heading"><span>RECENT CONVERSATIONS</span><button type="button" data-new-chat aria-label="Start a new conversation">+</button></div>
+                            <div class="conversation-list">
+                                @forelse ($conversations as $conversation)
+                                    <div class="conversation-row {{ $selectedConversation?->id === $conversation->id ? 'selected' : '' }}" data-conversation-row="{{ $conversation->id }}">
+                                        <button class="conversation-item {{ $selectedConversation?->id === $conversation->id ? 'selected' : '' }}" type="button" data-load-conversation="{{ $conversation->id }}">
+                                            <b>{{ \Illuminate\Support\Str::limit($conversation->title, 28) }}</b>
+                                            <small>{{ $conversation->updated_at->diffForHumans() }}</small>
+                                        </button>
+                                        <button class="conversation-delete-btn" type="button" data-delete-conversation="{{ $conversation->id }}" title="Delete chat" aria-label="Delete chat">×</button>
+                                    </div>
+                                @empty
+                                    <p class="conversation-empty">Your saved conversations will appear here.</p>
+                                @endforelse
+                            </div>
                         </aside>
                         <div class="chat-workspace">
                             <div class="chat-messages" id="chat-messages" aria-live="polite" data-conversation-id="{{ $selectedConversation?->id ?? '' }}">

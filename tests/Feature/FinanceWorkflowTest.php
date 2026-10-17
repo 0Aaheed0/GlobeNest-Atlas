@@ -7,6 +7,8 @@ use App\Models\User;
 use App\Services\CurrencyCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
+use Laravel\Socialite\Contracts\Provider;
+use Laravel\Socialite\Facades\Socialite;
 use Tests\TestCase;
 
 class FinanceWorkflowTest extends TestCase
@@ -16,8 +18,40 @@ class FinanceWorkflowTest extends TestCase
     public function test_landing_and_authentication_pages_render(): void
     {
         $this->get(route('home'))->assertOk()->assertSee('Your next chapter.')->assertSee('data-theme-toggle');
-        $this->get(route('login'))->assertOk()->assertSee('Sign in securely')->assertSee('data-theme-toggle');
-        $this->get(route('register'))->assertOk()->assertSee('Create account')->assertSee('data-theme-toggle');
+        $this->get(route('login'))->assertOk()->assertSee('Welcome back')->assertSee('data-theme-toggle');
+        $this->get(route('register'))->assertOk()->assertSee('Create your account')->assertSee('data-theme-toggle');
+    }
+
+    public function test_google_oauth_redirect(): void
+    {
+        $response = $this->get(route('auth.google'));
+        $response->assertRedirect();
+        $this->assertStringContainsString('accounts.google.com', (string) $response->headers->get('Location'));
+    }
+
+    public function test_google_oauth_callback_creates_and_authenticates_user(): void
+    {
+        $abstractUser = \Mockery::mock(\Laravel\Socialite\Two\User::class);
+        $abstractUser->shouldReceive('getId')->andReturn('1234567890');
+        $abstractUser->shouldReceive('getEmail')->andReturn('googleuser@example.test');
+        $abstractUser->shouldReceive('getName')->andReturn('Google Explorer');
+        $abstractUser->shouldReceive('getNickname')->andReturn('explorer');
+
+        $provider = \Mockery::mock(Provider::class);
+        $provider->shouldReceive('user')->andReturn($abstractUser);
+
+        Socialite::shouldReceive('driver')->with('google')->andReturn($provider);
+
+        $response = $this->get(route('auth.google.callback'));
+        $response->assertRedirect(route('dashboard'));
+
+        $this->assertAuthenticated();
+        $this->assertDatabaseHas('users', [
+            'email' => 'googleuser@example.test',
+            'name' => 'Google Explorer',
+        ]);
+        $user = User::where('email', 'googleuser@example.test')->firstOrFail();
+        $this->assertNotNull($user->email_verified_at);
     }
 
     public function test_dashboard_requires_authentication_and_registration_starts_onboarding(): void
@@ -30,6 +64,13 @@ class FinanceWorkflowTest extends TestCase
             'email' => 'student@example.test',
             'password' => 'very-secure-password',
             'password_confirmation' => 'very-secure-password',
+        ])->assertRedirect(route('register'));
+
+        $this->assertTrue(session()->has('pending_registration'));
+        $code = session('pending_registration')['code'];
+
+        $this->post(route('register.verify'), [
+            'verification_code' => $code,
         ])->assertRedirect(route('dashboard'));
 
         $this->assertAuthenticated();

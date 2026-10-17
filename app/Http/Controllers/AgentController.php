@@ -123,4 +123,15 @@ class AgentController extends Controller
 
         return response()->json(['message' => 'The proposed change was discarded. Nothing was saved.']);
     }
+
+    public function destroy(Request $request, AgentConversation $conversation): JsonResponse
+    {
+        $ownedConversation = $request->user()->agentConversations()->whereKey($conversation->id)->firstOrFail();
+        $ownedConversation->delete();
+
+        return response()->json([
+            'message' => 'Conversation deleted.',
+            'conversation_id' => $conversation->id,
+        ]);
+    }
 }

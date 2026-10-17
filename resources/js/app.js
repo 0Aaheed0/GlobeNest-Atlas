@@ -18,7 +18,9 @@ function setTheme(theme, persist = false) {
 
     document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
         const nextTheme = normalizedTheme === 'dark' ? 'light' : 'dark';
-        button.textContent = normalizedTheme === 'dark' ? 'Light' : 'Dark';
+        if (!button.classList.contains('theme-toggle-icon')) {
+            button.textContent = normalizedTheme === 'dark' ? 'Light' : 'Dark';
+        }
         button.setAttribute('aria-label', `Switch to ${nextTheme} theme`);
         button.setAttribute('aria-pressed', String(normalizedTheme === 'light'));
     });
@@ -37,6 +39,18 @@ setTheme(readThemePreference() || systemTheme);
 document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
     button.addEventListener('click', () => {
         setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+    });
+});
+
+// Password visibility toggle helper
+document.querySelectorAll('[data-toggle-password]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        const inputId = btn.dataset.togglePassword;
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        btn.textContent = isPassword ? '👁‍🗨' : '👁';
     });
 });
 
@@ -551,11 +565,56 @@ document.querySelectorAll('[data-load-conversation]').forEach((button) => {
                     addToolResults(message.tool_result, [], false, renderedMessage);
                 }
             });
-            document.querySelectorAll('.conversation-item').forEach((item) => item.classList.toggle('selected', item === button));
+            document.querySelectorAll('.conversation-row, .conversation-item').forEach((item) => {
+                item.classList.toggle('selected', item === button || item.contains(button));
+            });
             document.querySelector('#assistant')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         } catch (error) {
             showToast(error.message, true);
         } finally {
+            button.disabled = false;
+        }
+    });
+});
+
+document.querySelectorAll('[data-delete-conversation]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const convId = button.dataset.deleteConversation;
+        if (!confirm('Are you sure you want to delete this conversation?')) return;
+
+        button.disabled = true;
+        try {
+            const response = await fetch(`/agent/conversations/${encodeURIComponent(convId)}`, {
+                method: 'DELETE',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken,
+                },
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || 'Failed to delete conversation.');
+
+            const row = button.closest('[data-conversation-row]') || button.closest('.conversation-item');
+            row?.remove();
+
+            if (conversationId === String(convId)) {
+                conversationId = '';
+                if (chatMessages) {
+                    chatMessages.dataset.conversationId = '';
+                    chatMessages.replaceChildren();
+                    const welcome = makeElement('div', 'chat-welcome');
+                    welcome.append(
+                        makeElement('span', 'welcome-spark', '✳'),
+                        makeElement('h3', '', 'What’s on your mind?'),
+                        makeElement('p', '', 'Send a question to start a new private conversation.')
+                    );
+                    chatMessages.append(welcome);
+                }
+            }
+            showToast('Conversation deleted.');
+        } catch (error) {
+            showToast(error.message, true);
             button.disabled = false;
         }
     });

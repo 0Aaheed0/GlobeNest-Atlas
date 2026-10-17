@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#09111f">
-    <title>GlobeNest Atlas — clarity for money across borders</title>
+    <title>GlobeNest Atlas</title>
     @include('partials.theme-init')
     @if (file_exists(public_path('build/manifest.json')) || file_exists(public_path('hot')))
         @vite(['resources/css/app.css', 'resources/js/app.js'])

@@ -10,11 +10,17 @@ Route::get('/login', [AuthController::class, 'loginForm'])->middleware('guest')-
 Route::post('/login', [AuthController::class, 'login'])->middleware(['guest', 'throttle:5,1'])->name('login.store');
 Route::get('/register', [AuthController::class, 'registerForm'])->middleware('guest')->name('register');
 Route::post('/register', [AuthController::class, 'register'])->middleware(['guest', 'throttle:5,1'])->name('register.store');
+Route::post('/register/verify', [AuthController::class, 'verifyCode'])->middleware(['guest', 'throttle:10,1'])->name('register.verify');
+Route::post('/register/resend', [AuthController::class, 'resendCode'])->middleware(['guest', 'throttle:5,1'])->name('register.resend');
+Route::post('/register/cancel', [AuthController::class, 'cancelRegistration'])->middleware('guest')->name('register.cancel');
+Route::get('/auth/google', [AuthController::class, 'redirectToGoogle'])->middleware('guest')->name('auth.google');
+Route::get('/auth/google/callback', [AuthController::class, 'handleGoogleCallback'])->middleware('guest')->name('auth.google.callback');
 Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth')->name('logout');
 
 Route::middleware('auth')->group(function (): void {
     Route::get('/app', [FinanceController::class, 'dashboard'])->name('dashboard');
     Route::get('/agent/conversations/{conversation}', [AgentController::class, 'history'])->name('agent.history');
+    Route::delete('/agent/conversations/{conversation}', [AgentController::class, 'destroy'])->name('agent.destroy');
     Route::put('/profile', [FinanceController::class, 'saveProfile'])->middleware('throttle:10,1')->name('profile.save');
     Route::post('/tuition', [FinanceController::class, 'storeTuition'])->middleware('throttle:10,1')->name('tuition.store');
     Route::post('/tuition/{tuitionPlan}/progress', [FinanceController::class, 'addTuitionSavings'])->middleware('throttle:10,1')->name('tuition.progress');
