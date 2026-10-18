@@ -103,6 +103,11 @@ class AgentController extends Controller
             ], 422);
         }
 
+        // Record the confirmed action as structured task context so subsequent
+        // conversational turns can resolve references like "delete the thing you
+        // just made" to the exact verified record without relying on model memory.
+        $this->recordLastActionContext($conversation, $saved);
+
         return response()->json([
             'message' => ($saved['deleted'] ?? false)
                 ? 'Confirmed and deleted from your account. No payment was made.'
@@ -126,6 +131,10 @@ class AgentController extends Controller
             return response()->json(['message' => 'This pending action has already expired or been handled.'], 422);
         }
 
+        // Clear any pending intent context when the user cancels, so the next
+        // message starts fresh rather than inheriting a stale workflow.
+        $this->clearPendingIntentContext($conversation);
+
         return response()->json(['message' => 'The proposed change was discarded. Nothing was saved.']);
     }
 
@@ -138,5 +147,51 @@ class AgentController extends Controller
             'message' => 'Conversation deleted.',
             'conversation_id' => $conversation->id,
         ]);
+    }
+
+    /**
+     * After a confirmed action, store structured metadata about the last
+     * saved/deleted record. This allows subsequent turns to resolve
+     * "delete the thing you just made" to the exact verified ID.
+     *
+     * @param  array<string, mixed>  $saved
+     */
+    private function recordLastActionContext(AgentConversation $conversation, array $saved): void
+    {
+        if (empty($saved['record_type'])) {
+            return;
+        }
+
+        $existing = is_array($conversation->task_context) ? $conversation->task_context : [];
+
+        // Keep existing pending_intent if there is one; overwrite last_action.
+        $existing['last_action'] = array_filter([
+            'tool_name' => $saved['record_type'] ?? null,
+            'record_type' => $saved['record_type'] ?? null,
+            'id' => $saved['id'] ?? null,
+            'title' => $saved['title'] ?? null,
+            'category' => $saved['category'] ?? null,
+            'amount' => $saved['amount'] ?? null,
+            'currency' => $saved['currency'] ?? null,
+            'deleted' => ($saved['deleted'] ?? false) ? true : null,
+        ], fn ($v) => $v !== null);
+
+        // Remove pending_intent once an action has been confirmed.
+        unset($existing['pending_intent']);
+
+        $conversation->update(['task_context' => $existing]);
+    }
+
+    /**
+     * Clear the pending_intent portion of task_context on cancel.
+     */
+    private function clearPendingIntentContext(AgentConversation $conversation): void
+    {
+        $existing = is_array($conversation->task_context) ? $conversation->task_context : [];
+
+        if (isset($existing['pending_intent'])) {
+            unset($existing['pending_intent']);
+            $conversation->update(['task_context' => empty($existing) ? null : $existing]);
+        }
     }
 }

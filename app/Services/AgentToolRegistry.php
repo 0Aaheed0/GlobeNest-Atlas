@@ -109,6 +109,10 @@ class AgentToolRegistry
                 'title' => ['type' => 'string', 'description' => 'Plan title, max 120 characters.'],
                 'summary' => ['type' => 'string', 'description' => 'Short plan with assumptions, max 500 characters.'],
             ], ['title', 'summary']),
+            $this->declaration('update_profile', 'Prepare a change to one or more allowlisted student profile fields. Only destination_country and financial_goals may be changed through the agent. Home currency, password, email, MFA, and security settings cannot be changed through this tool. The user must confirm the exact before-and-after values.', [
+                'destination_country' => ['type' => 'string', 'description' => 'Optional updated study destination country, max 80 characters.'],
+                'financial_goals' => ['type' => 'string', 'description' => 'Optional updated financial goals text, max 1000 characters.'],
+            ]),
         ];
     }
 
@@ -142,6 +146,7 @@ class AgentToolRegistry
                     'source' => 'Simulated fee profiles, ranked by estimated recipient amount after fees. Not provider offers, live rates, or delivery guarantees.',
                 ],
                 'create_savings_goal', 'create_budget', 'save_plan' => $this->pendingAction($user, $conversation, $name, $data),
+                'update_profile' => $this->prepareProfileUpdate($user, $conversation, $data),
                 default => throw new \InvalidArgumentException('This tool is not available.'),
             };
 
@@ -195,6 +200,7 @@ class AgentToolRegistry
                         'delete_tuition_plan' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->deleteTuitionPlan($user, $data, $pending->before_state ?? [])),
                         'delete_savings_goal' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->deleteSavingsGoal($user, $data, $pending->before_state ?? [])),
                         'delete_budget' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->deleteBudget($user, $data, $pending->before_state ?? [])),
+                        'update_profile' => $this->confirmAndSave($user, $conversation, $pending, fn (): array => $this->saveProfileUpdate($user, $data, $pending->before_state ?? [])),
                         default => throw new \InvalidArgumentException('This action does not support confirmation.'),
                     };
                 } catch (ModelNotFoundException $exception) {
@@ -354,6 +360,10 @@ class AgentToolRegistry
                 'title' => ['required', 'string', 'max:120'],
                 'summary' => ['required', 'string', 'max:500'],
             ],
+            'update_profile' => [
+                'destination_country' => ['sometimes', 'string', 'min:1', 'max:80'],
+                'financial_goals' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            ],
             default => throw new \InvalidArgumentException('This tool is not available.'),
         };
 
@@ -432,6 +442,11 @@ class AgentToolRegistry
         if ($name === 'update_tuition_plan'
             && array_intersect(array_keys($data), ['amount', 'saved_amount', 'due_date', 'installments']) === []) {
             throw ValidationException::withMessages(['tuition_plan_id' => 'Provide at least one tuition plan change.']);
+        }
+
+        if ($name === 'update_profile'
+            && array_intersect(array_keys($data), ['destination_country', 'financial_goals']) === []) {
+            throw ValidationException::withMessages(['destination_country' => 'Provide at least one profile field to update.']);
         }
 
         return $data;
@@ -1116,6 +1131,62 @@ class AgentToolRegistry
         if ($expected !== $current) {
             throw new \InvalidArgumentException('The record changed after this draft. Prepare a new action for review.');
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function prepareProfileUpdate(User $user, AgentConversation $conversation, array $data): array
+    {
+        $profile = $user->studentProfile()->first();
+        $before = $this->profileSnapshot($profile);
+
+        return $this->pendingAction($user, $conversation, 'update_profile', $data, $before);
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $beforeState
+     * @return array<string, mixed>
+     */
+    private function saveProfileUpdate(User $user, array $data, array $beforeState): array
+    {
+        // Reload with lock for update.
+        $profile = $user->studentProfile()->lockForUpdate()->first();
+        $this->assertUnchangedSnapshot($beforeState, $this->profileSnapshot($profile));
+
+        $updates = array_intersect_key($data, array_flip(['destination_country', 'financial_goals']));
+
+        if ($profile === null) {
+            throw new \InvalidArgumentException('Profile not found; complete the profile setup before updating it via the agent.');
+        }
+
+        $profile->update($updates);
+
+        $fresh = $profile->refresh();
+
+        return [
+            'saved' => true,
+            'record_type' => 'student_profile',
+            'destination_country' => $fresh->destination_country,
+            'financial_goals' => $fresh->financial_goals,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function profileSnapshot(?object $profile): array
+    {
+        if ($profile === null) {
+            return ['destination_country' => null, 'financial_goals' => null];
+        }
+
+        return [
+            'destination_country' => $profile->destination_country,
+            'financial_goals' => $profile->financial_goals,
+        ];
     }
 
     /**

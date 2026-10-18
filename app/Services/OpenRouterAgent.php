@@ -33,11 +33,31 @@ class OpenRouterAgent
             return ['text' => $smallTalk, 'tool_results' => [], 'pending_actions' => []];
         }
 
-        $history = $user->studentProfile?->memory_consent
-            ? $conversation->messages()->latest('id')->limit(12)->get()->reverse()
-            : collect([$conversation->messages()->where('role', 'user')->latest('id')->first()]);
+        // Build the system prompt, appending any verified task-context note.
+        // The task context is server-managed structured state; it never contains
+        // raw conversation content and is safe to inject regardless of consent.
+        $systemContent = self::SYSTEM_PROMPT;
+        $taskContextNote = $this->buildTaskContextNote($conversation);
+
+        if ($taskContextNote !== '') {
+            $systemContent .= "\n\n".$taskContextNote;
+        }
+
+        if ($user->studentProfile?->memory_consent) {
+            // Full history: send recent turns to the provider.
+            $history = $conversation->messages()->latest('id')->limit(12)->get()->reverse();
+        } else {
+            // Privacy mode: the user has not consented to sending raw conversation
+            // history to the AI provider. We still need continuity for an active
+            // workflow, so we include the current user message only.
+            // The task-context note (injected into the system prompt above) carries
+            // the verified last-action and pending-intent metadata without sending
+            // raw earlier messages.
+            $history = collect([$conversation->messages()->where('role', 'user')->latest('id')->first()]);
+        }
+
         $messages = [
-            ['role' => 'system', 'content' => self::SYSTEM_PROMPT],
+            ['role' => 'system', 'content' => $systemContent],
             ...$history->filter()->map(fn ($entry): array => [
                 'role' => $entry->role,
                 'content' => $entry->content,
@@ -158,6 +178,69 @@ class OpenRouterAgent
 
             $iterations++;
         }
+    }
+
+    /**
+     * Build a structured task-context note to append to the system prompt.
+     *
+     * This provides the model with verified server-side state — the last confirmed
+     * action result and any active workflow intent — without relying on raw
+     * conversation history or model memory. The note is never stored on its own;
+     * it is derived at request time from conversation.task_context.
+     */
+    private function buildTaskContextNote(AgentConversation $conversation): string
+    {
+        $context = $conversation->task_context;
+
+        if (! is_array($context) || empty($context)) {
+            return '';
+        }
+
+        $lines = ['[VERIFIED TASK CONTEXT — server-managed state, do not contradict or fabricate]'];
+
+        if (isset($context['last_action']) && is_array($context['last_action'])) {
+            $action = $context['last_action'];
+            $recordType = $action['record_type'] ?? 'unknown';
+            $id = $action['id'] ?? null;
+            $detail = array_filter([
+                isset($action['category']) ? 'category='.$action['category'] : null,
+                isset($action['title']) ? 'title='.$action['title'] : null,
+                isset($action['amount']) ? 'amount='.$action['amount'].' '.($action['currency'] ?? '') : null,
+            ]);
+            $lines[] = sprintf(
+                'Last confirmed action: %s (record_type=%s%s%s)',
+                $action['tool_name'] ?? 'unknown',
+                $recordType,
+                $id !== null ? ', id='.(string) $id : '',
+                $detail !== [] ? ', '.implode(', ', $detail) : '',
+            );
+            $lines[] = 'If the user refers to "the thing you just made", "it", "that record", or a similar pronoun, resolve to this exact verified record before preparing any change.';
+        }
+
+        if (isset($context['pending_intent']) && is_array($context['pending_intent'])) {
+            $intent = $context['pending_intent'];
+            $lines[] = sprintf(
+                'Active workflow: operation=%s, target=%s',
+                $intent['operation'] ?? 'unknown',
+                $intent['record_type'] ?? 'unknown',
+            );
+
+            if (! empty($intent['supplied_fields']) && is_array($intent['supplied_fields'])) {
+                $parts = [];
+
+                foreach ($intent['supplied_fields'] as $k => $v) {
+                    $parts[] = $k.'='.json_encode($v);
+                }
+
+                $lines[] = 'Already supplied by user: '.implode(', ', $parts).'. Do not ask for these again.';
+            }
+
+            if (! empty($intent['missing_fields']) && is_array($intent['missing_fields'])) {
+                $lines[] = 'Still required: '.implode(', ', $intent['missing_fields']);
+            }
+        }
+
+        return implode("\n", $lines);
     }
 
     private function smallTalkResponse(string $message): ?string

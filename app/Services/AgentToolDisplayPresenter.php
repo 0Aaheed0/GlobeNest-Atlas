@@ -70,6 +70,7 @@ class AgentToolDisplayPresenter
                 'update_savings_goal' => ['goal_id', 'target_amount', 'current_amount'],
                 'update_tuition_plan' => ['tuition_plan_id', 'amount', 'saved_amount', 'due_date', 'installments'],
                 'update_budget' => ['budget_id', 'category', 'amount', 'currency'],
+                'update_profile' => ['destination_country', 'financial_goals'],
                 'delete_tuition_plan' => ['tuition_plan_id'],
                 'delete_savings_goal' => ['goal_id'],
                 'delete_budget' => ['budget_id'],
@@ -79,6 +80,7 @@ class AgentToolDisplayPresenter
                 'update_savings_goal' => ['id', 'title', 'target_amount', 'current_amount', 'currency', 'target_date'],
                 'update_tuition_plan' => ['id', 'title', 'amount', 'saved_amount', 'currency', 'due_date', 'installments'],
                 'update_budget', 'delete_budget' => ['id', 'category', 'amount', 'currency', 'period_start', 'period_end'],
+                'update_profile' => ['destination_country', 'financial_goals'],
                 'delete_savings_goal' => ['id', 'title', 'target_amount', 'current_amount', 'currency', 'target_date'],
                 'delete_tuition_plan' => ['id', 'title', 'amount', 'saved_amount', 'currency', 'due_date', 'installments'],
                 default => [],
@@ -348,12 +350,15 @@ class AgentToolDisplayPresenter
             'update_savings_goal' => 'Savings goal',
             'update_tuition_plan' => 'Tuition plan',
             'update_budget' => 'Monthly budget',
+            'update_profile' => 'Student profile',
             default => null,
         };
 
         if ($target !== null) {
-            $recordName = $before['title'] ?? $before['category'] ?? 'Untitled record';
-            $receipt['inputs'] = ["{$target} #{$before['id']}: {$recordName}."];
+            $recordName = $before['title'] ?? $before['category'] ?? $before['destination_country'] ?? 'Untitled record';
+            $receipt['inputs'] = isset($before['id'])
+                ? ["{$target} #{$before['id']}: {$recordName}."]
+                : ["{$target}: {$recordName}."];
         }
 
         if ($name === 'create_tuition_plan' && is_array($toolResult['schedule'] ?? null)) {

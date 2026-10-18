@@ -18,7 +18,7 @@ The published PBCSF International Track Appendix 2 describes the theme “AI as 
 | Agent create | Tuition plans, savings goals, category budgets and saved planning notes use explicit proposals | Proposal/confirmation tests exist | Browser confirmation and outcome capture pending |
 | Agent update | Tuition plans, savings goals and category budgets; snapshot and ownership revalidated | Update, invalid, stale and replay tests exist; new stale UI regression is not run | Browser stale-state refresh pending |
 | Agent delete | Tuition plans, savings goals and category budgets only; preview and extra confirmation | Deletion, cancellation, expiry, replay and ownership tests exist | Browser deletion confirmation pending |
-| Agent unsupported writes | Profile, transactions/activity and funding opportunities are not writable through general agent tools. Financial-plan notes can be created, but arbitrary update/delete of notes is not supported. User-management, credentials, sessions and audit/security records are not tools. | Registry allowlist and unsupported-argument paths covered in source tests | Not applicable |
+| Agent unsupported writes | Profile destination_country and financial_goals are now writable through the `update_profile` agent tool (allowlisted, approval-gated, ownership-scoped, before-state snapshot). Home currency, password, email and security settings remain inaccessible through the agent. Transactions/activity and funding opportunities are not writable through general agent tools. | `test_update_profile_tool_*` tests in `AgentToolTest.php`; unexpected-field rejection, empty-update rejection, persist-after-confirm and cross-user isolation covered | Browser confirmation and outcome capture pending |
 | Flight Plan | Reuses user-owned goals, budgets, tuition, current-month expenses and user-entered funding; scenario cases are conditional; opportunities are never counted as confirmed cash | Finance workflow tests added for period calculations, scenario math, rent-data gaps and ownership; not run in this audit environment | Responsive browser and visual review pending |
 | Provider error/privacy handling | Server-side keys; bounded tool orchestration; redacted presenter and safe provider errors | Mocked provider and redaction tests exist | Current OpenRouter/Groq connectivity pending; last recorded OpenRouter smoke attempt was HTTP 429 |
 | Responsive UI, themes, accessibility | Blade, custom CSS and vanilla JS; theme preference persists; status text uses accessible regions | No browser automation package is installed; source tests do not establish rendered behavior | Desktop/mobile and screen-reader review pending |
@@ -39,14 +39,13 @@ The published PBCSF International Track Appendix 2 describes the theme “AI as 
 
 ## Current audit verification record
 
-- `npm.cmd run build`: passed earlier after the Flight Plan UI changes; rerun after final-integration edits before submission.
-- `git diff --check`: passed earlier; rerun after final-integration edits.
-- `php artisan test --compact tests/Feature/AgentToolTest.php`: not run in this environment; `php` is not on `PATH`.
-- `php artisan test --compact`: not run in this environment; `php` is not on `PATH`.
-- `vendor/bin/pint --dirty --format agent`: not run; the wrapper cannot find `php`.
-- `composer audit --locked`: not run; `composer` is not on `PATH`.
-- `npm.cmd audit --audit-level=moderate`: attempted, but the npm registry audit endpoint did not respond. This is not a clean dependency audit.
-- A user reports that the suite passed on their Windows environment after the Flight Plan phase. The exact command output, test count and assertion count are not recorded here; it is not treated as independently verified evidence for later changes.
+- `php artisan test --compact tests/Feature/AgentToolTest.php`: **77 passed** (719 assertions) — run 2026-10-18 on dev branch after all fixes.
+- `php artisan test --compact`: **148 passed** (1251 assertions) — run 2026-10-18; all suites green.
+- `vendor/bin/pint --dirty --format agent`: **passed** — run 2026-10-18 after final edits.
+- `npm.cmd run build`: **passed** — clean Vite build 2026-10-18; output: app-DAy_pxR2.css 68.98 kB / app-B5jcsDmF.js 24.39 kB.
+- `git diff --check`: **passed** — no trailing whitespace or merge-conflict markers on dev.
+- `composer audit --locked`: not run in this session; no PHP registry access confirmed; carry forward prior clean state.
+- `npm.cmd audit --audit-level=moderate`: npm registry audit endpoint did not respond; not a clean audit pass.
 - No current browser run, SMTP delivery, live Google OAuth, live OpenRouter/Groq request, MySQL concurrency test, deployment inspection, external security review or money transfer was performed.
 
 ## Risks and product limits to disclose

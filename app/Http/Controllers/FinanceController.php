@@ -26,8 +26,12 @@ use Illuminate\View\View;
 
 class FinanceController extends Controller
 {
-    public function landing(): View
+    public function landing(): View|RedirectResponse
     {
+        if (auth()->check()) {
+            return redirect()->route('dashboard');
+        }
+
         return view('landing');
     }
 

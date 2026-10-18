@@ -1260,7 +1260,7 @@ class AgentToolTest extends TestCase
         $this->assertSame(2, Http::recorded()->count());
         Http::assertSent(fn (Request $request): bool => $request->url() === 'https://api.groq.com/openai/v1/chat/completions'
             && $request['tool_choice'] === 'auto'
-            && count($request['tools']) === 17
+            && count($request['tools']) === 18
             && $request['max_completion_tokens'] === 900
             && ! array_key_exists('max_tokens', $request->data())
             && collect($request['messages'] ?? [])->contains(fn (array $message): bool => ($message['role'] ?? null) === 'tool'
@@ -1449,6 +1449,7 @@ class AgentToolTest extends TestCase
             'create_savings_goal',
             'create_budget',
             'save_plan',
+            'update_profile',
         ];
 
         $this->assertSame($expectedNames, array_column($declarations, 'name'));
@@ -1534,17 +1535,17 @@ class AgentToolTest extends TestCase
         Http::assertSentInOrder([
             fn (Request $request): bool => $request['model'] === 'cohere/north-mini-code:free'
                 && $request['tool_choice'] === 'auto'
-                && count($request['tools']) === 17
+                && count($request['tools']) === 18
                 && count($request['messages']) === 6
                 && array_column($request['messages'], 'role') === ['system', 'user', 'assistant', 'user', 'assistant', 'user'],
             fn (Request $request): bool => $request['tool_choice'] === 'auto'
-                && count($request['tools']) === 17
+                && count($request['tools']) === 18
                 && array_column($request['messages'], 'role') === ['system', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'tool']
                 && $request['messages'][6]['tool_calls'][0]['id'] === 'synthetic_summary_call'
                 && $request['messages'][7]['tool_call_id'] === 'synthetic_summary_call'
                 && is_string($request['messages'][7]['content']),
             fn (Request $request): bool => $request['tool_choice'] === 'auto'
-                && count($request['tools']) === 17
+                && count($request['tools']) === 18
                 && array_column($request['messages'], 'role') === ['system', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'tool', 'assistant', 'tool']
                 && $request['messages'][8]['tool_calls'][0]['id'] === 'synthetic_tuition_call'
                 && $request['messages'][9]['tool_call_id'] === 'synthetic_tuition_call'
@@ -1779,7 +1780,7 @@ class AgentToolTest extends TestCase
             $this->assertTrue($context['response_tool_calls_present']);
             $this->assertSame(1, $context['response_tool_call_count']);
             $this->assertSame('auto', $context['request_tool_choice']);
-            $this->assertSame(17, $context['request_tool_count']);
+            $this->assertSame(18, $context['request_tool_count']);
             $this->assertSame(2, $context['request_message_count']);
             $this->assertStringNotContainsString($apiKey, json_encode($context));
             $this->assertStringNotContainsString($privateFinancialDetails, json_encode($context));
@@ -2462,5 +2463,451 @@ class AgentToolTest extends TestCase
                 'arguments' => json_encode($arguments, JSON_THROW_ON_ERROR),
             ],
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Task-context and multi-turn regression tests
+    // -------------------------------------------------------------------------
+
+    public function test_confirm_records_last_action_task_context_on_conversation(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_budget', [
+                    'category' => 'Transport',
+                    'amount' => '1000.00',
+                    'currency' => 'BDT',
+                ], 'call_budget'))
+                ->push($this->textResponse('Review this budget before saving.')),
+        ]);
+        $user = User::factory()->create();
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Add a Transport budget of 1000 BDT.',
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'create_budget');
+
+        $conversationId = $chatResponse->json('conversation_id');
+        $pendingActionId = $chatResponse->json('pending_actions.0.id');
+
+        $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $pendingActionId,
+            'confirmed' => true,
+        ])->assertOk()->assertJsonPath('saved.saved', true);
+
+        // After confirmation, task_context must record the last verified action.
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $taskContext = $conversation->task_context;
+        $this->assertIsArray($taskContext);
+        $this->assertArrayHasKey('last_action', $taskContext);
+        $this->assertSame('budget', $taskContext['last_action']['record_type']);
+        $this->assertSame('Transport', $taskContext['last_action']['category']);
+        $this->assertSame('1000.00', $taskContext['last_action']['amount']);
+        $this->assertSame('BDT', $taskContext['last_action']['currency']);
+        $this->assertIsInt($taskContext['last_action']['id']);
+    }
+
+    public function test_task_context_note_is_injected_into_system_prompt_when_last_action_exists(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('I will delete that budget for you.')),
+        ]);
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Germany',
+            'home_currency' => 'BDT',
+            'monthly_budget' => '50000.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+        $budget = $user->budgets()->create([
+            'category' => 'Transport',
+            'amount' => '1000.00',
+            'currency' => 'BDT',
+            'period_start' => today()->startOfMonth(),
+            'period_end' => today()->endOfMonth(),
+        ]);
+        $conversation = $user->agentConversations()->create([
+            'title' => 'Budget context test',
+            'task_context' => [
+                'last_action' => [
+                    'tool_name' => 'budget',
+                    'record_type' => 'budget',
+                    'id' => $budget->id,
+                    'category' => 'Transport',
+                    'amount' => '1000.00',
+                    'currency' => 'BDT',
+                ],
+            ],
+        ]);
+        $conversation->messages()->create([
+            'user_id' => $user->id,
+            'role' => 'user',
+            'content' => 'Delete the thing you just made.',
+        ]);
+
+        app(OpenRouterAgent::class)->respond(
+            $user,
+            $conversation,
+            'Delete the thing you just made.',
+        );
+
+        // Task-context note must appear in the system message sent to the provider.
+        Http::assertSent(function (Request $request) use ($budget): bool {
+            $systemContent = $request['messages'][0]['content'] ?? '';
+
+            return str_contains($systemContent, 'VERIFIED TASK CONTEXT')
+                && str_contains($systemContent, 'record_type=budget')
+                && str_contains($systemContent, 'id='.$budget->id)
+                && str_contains($systemContent, 'category=Transport');
+        });
+    }
+
+    public function test_task_context_is_cleared_of_pending_intent_on_cancel(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_budget', [
+                    'category' => 'Food',
+                    'amount' => '500.00',
+                    'currency' => 'USD',
+                ], 'call_food'))
+                ->push($this->textResponse('Review this food budget.')),
+        ]);
+        $user = User::factory()->create();
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Add a Food budget of 500 USD.',
+        ])->assertOk();
+
+        $conversationId = $chatResponse->json('conversation_id');
+        $pendingActionId = $chatResponse->json('pending_actions.0.id');
+
+        // Place a pending_intent to simulate an active workflow.
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $conversation->update([
+            'task_context' => [
+                'pending_intent' => [
+                    'operation' => 'create',
+                    'record_type' => 'budget',
+                    'supplied_fields' => ['category' => 'Food'],
+                    'missing_fields' => [],
+                ],
+            ],
+        ]);
+
+        $this->postJson(route('agent.cancel'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $pendingActionId,
+            'discarded' => true,
+        ])->assertOk();
+
+        $conversation->refresh();
+        $this->assertNull(($conversation->task_context ?? [])['pending_intent'] ?? null);
+        $this->assertDatabaseCount('budgets', 0);
+    }
+
+    public function test_task_context_is_scoped_to_authenticated_user_and_conversation(): void
+    {
+        $userA = User::factory()->create();
+        $userB = User::factory()->create();
+
+        $conversationA = $userA->agentConversations()->create([
+            'title' => 'User A conversation',
+            'task_context' => [
+                'last_action' => ['record_type' => 'budget', 'id' => 999, 'category' => 'Private A'],
+            ],
+        ]);
+        $conversationB = $userB->agentConversations()->create(['title' => 'User B conversation']);
+
+        // User B cannot access user A's conversation.
+        $this->actingAs($userB)->getJson(route('agent.history', $conversationA->id))->assertNotFound();
+
+        // User B cannot confirm an action in user A's conversation.
+        $this->actingAs($userB)->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationA->id,
+            'pending_action_id' => 1,
+            'confirmed' => true,
+        ])->assertNotFound();
+
+        // User B's conversation has no context from user A.
+        $this->assertNull($conversationB->fresh()->task_context);
+    }
+
+    public function test_delete_the_thing_you_just_made_resolves_to_last_verified_budget(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+
+        $user = User::factory()->create();
+        $budget = $user->budgets()->create([
+            'category' => 'Transport',
+            'amount' => '1000.00',
+            'currency' => 'BDT',
+            'period_start' => today()->startOfMonth(),
+            'period_end' => today()->endOfMonth(),
+        ]);
+
+        // Simulate what AgentController stores after a confirmed creation.
+        $conversation = $user->agentConversations()->create([
+            'title' => 'Delete test',
+            'task_context' => [
+                'last_action' => [
+                    'tool_name' => 'budget',
+                    'record_type' => 'budget',
+                    'id' => $budget->id,
+                    'category' => 'Transport',
+                    'amount' => '1000.00',
+                    'currency' => 'BDT',
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('delete_budget', ['budget_id' => $budget->id], 'call_delete'))
+                ->push($this->textResponse('The Transport budget has been deleted.')),
+        ]);
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Delete the thing you just made.',
+            'conversation_id' => $conversation->id,
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'delete_budget');
+
+        $pendingActionId = $chatResponse->json('pending_actions.0.id');
+        $this->assertDatabaseCount('budgets', 1);
+
+        $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversation->id,
+            'pending_action_id' => $pendingActionId,
+            'confirmed' => true,
+        ])->assertOk()
+            ->assertJsonPath('saved.deleted', true)
+            ->assertJsonPath('saved.category', 'Transport');
+
+        $this->assertDatabaseCount('budgets', 0);
+        $this->assertDatabaseMissing('budgets', ['id' => $budget->id]);
+
+        // After deletion, task_context records deleted=true on last_action.
+        $conversation->refresh();
+        $this->assertTrue(($conversation->task_context['last_action']['deleted'] ?? false));
+    }
+
+    public function test_task_context_does_not_bleed_between_conversations(): void
+    {
+        $user = User::factory()->create();
+        $budget = $user->budgets()->create([
+            'category' => 'Housing',
+            'amount' => '800.00',
+            'currency' => 'USD',
+            'period_start' => today()->startOfMonth(),
+            'period_end' => today()->endOfMonth(),
+        ]);
+
+        $conversationA = $user->agentConversations()->create([
+            'title' => 'Conversation A',
+            'task_context' => [
+                'last_action' => ['record_type' => 'budget', 'id' => $budget->id, 'category' => 'Housing'],
+            ],
+        ]);
+        $conversationB = $user->agentConversations()->create(['title' => 'Conversation B']);
+
+        $this->assertNotNull($conversationA->task_context);
+        $this->assertNull($conversationB->task_context);
+    }
+
+    public function test_update_profile_tool_prepares_pending_action_for_destination_country(): void
+    {
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1500.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Profile update']);
+        $registry = app(AgentToolRegistry::class);
+
+        $result = $registry->execute($user, 'update_profile', ['destination_country' => 'South Korea'], $conversation);
+
+        $this->assertTrue($result['confirmation_required']);
+        $this->assertSame('update_profile', $result['pending_action']['name']);
+        $this->assertSame('South Korea', $result['pending_action']['arguments']['destination_country']);
+        $this->assertSame('Canada', $result['pending_action']['before_state']['destination_country']);
+        $this->assertDatabaseHas('student_profiles', ['destination_country' => 'Canada']);
+    }
+
+    public function test_update_profile_tool_persists_destination_country_after_confirm(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('update_profile', ['destination_country' => 'South Korea'], 'call_profile'))
+                ->push($this->textResponse('Your study destination has been updated to South Korea.')),
+        ]);
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1500.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Change my study destination to South Korea.',
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'update_profile');
+
+        $this->assertDatabaseHas('student_profiles', ['destination_country' => 'Canada']);
+
+        $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $chatResponse->json('conversation_id'),
+            'pending_action_id' => $chatResponse->json('pending_actions.0.id'),
+            'confirmed' => true,
+        ])->assertOk()->assertJsonPath('saved.saved', true);
+
+        $this->assertDatabaseHas('student_profiles', ['destination_country' => 'South Korea']);
+    }
+
+    public function test_update_profile_tool_rejects_unexpected_fields(): void
+    {
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1500.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Security check']);
+        $registry = app(AgentToolRegistry::class);
+
+        // home_currency is not in the allowlist; must be rejected.
+        $this->expectException(InvalidArgumentException::class);
+        $registry->execute($user, 'update_profile', ['home_currency' => 'EUR'], $conversation);
+    }
+
+    public function test_update_profile_tool_requires_at_least_one_allowed_field(): void
+    {
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1500.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Empty update']);
+        $registry = app(AgentToolRegistry::class);
+
+        $this->expectException(ValidationException::class);
+        $registry->execute($user, 'update_profile', [], $conversation);
+    }
+
+    public function test_task_context_note_absent_for_fresh_conversation(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('Hello! How can I help?')),
+        ]);
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Fresh start']);
+        $conversation->messages()->create([
+            'user_id' => $user->id,
+            'role' => 'user',
+            'content' => 'Hello there.',
+        ]);
+
+        app(OpenRouterAgent::class)->respond($user, $conversation, 'Hello there.');
+
+        Http::assertSent(function (Request $request): bool {
+            return ! str_contains($request['messages'][0]['content'] ?? '', 'VERIFIED TASK CONTEXT');
+        });
+    }
+
+    public function test_history_consent_off_does_not_send_prior_user_messages_to_provider(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('Your balance is unknown without records.')),
+        ]);
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'France',
+            'home_currency' => 'EUR',
+            'monthly_budget' => '1200.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Privacy test']);
+        foreach ([['user', 'My salary is 5000 EUR.'], ['assistant', 'Noted.']] as [$role, $content]) {
+            $conversation->messages()->create(['user_id' => $user->id, 'role' => $role, 'content' => $content]);
+        }
+
+        // Save the current user message first — exactly as AgentController does.
+        $conversation->messages()->create(['user_id' => $user->id, 'role' => 'user', 'content' => 'What is my balance?']);
+
+        app(OpenRouterAgent::class)->respond($user, $conversation, 'What is my balance?');
+
+        Http::assertSent(function (Request $request): bool {
+            foreach ($request['messages'] ?? [] as $message) {
+                if (($message['role'] ?? '') === 'user'
+                    && str_contains($message['content'] ?? '', '5000 EUR')) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+    }
+
+    public function test_history_consent_on_sends_recent_conversation_history_to_provider(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Config::set('services.openrouter.model', 'openai/gpt-4o-mini');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('Here is your summary.')),
+        ]);
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'UK',
+            'home_currency' => 'GBP',
+            'monthly_budget' => '1000.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => true,
+        ]);
+        $conversation = $user->agentConversations()->create(['title' => 'Memory test']);
+        foreach ([['user', 'I need a budget overview.'], ['assistant', 'Sure, let me look.']] as [$role, $content]) {
+            $conversation->messages()->create(['user_id' => $user->id, 'role' => $role, 'content' => $content]);
+        }
+
+        app(OpenRouterAgent::class)->respond($user, $conversation, 'Show summary.');
+
+        Http::assertSent(function (Request $request): bool {
+            $roles = array_column($request['messages'] ?? [], 'role');
+
+            return in_array('assistant', $roles, true) && count($request['messages']) >= 3;
+        });
     }
 }
