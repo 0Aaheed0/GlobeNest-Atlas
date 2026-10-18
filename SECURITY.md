@@ -18,7 +18,7 @@ This is a source-level assessment of the repository, not a penetration test, sec
 
 Existing tests cover selected authentication, account isolation, financial calculations, provider failure handling, data redaction, tool validation, approval/cancellation/expiry/replay and stale-state behavior. A regression test covers a stale approval being marked failed and displayed as a no-change outcome.
 
-**Reported results for the tested revision `c44a0e2`** (an ancestor of the current `main`; also recorded in `docs/TECHNICAL-DOCUMENTATION.md`):
+**Reported results for the tested revision `c44a0e2`** (an ancestor of the current `main`; also recorded in `TECHNICAL-DOCUMENTATION.md`):
 
 - `php artisan test --compact tests/Feature/AgentToolTest.php`: **90 passed (811 assertions)**.
 - `php artisan test --compact`: **161 passed (1,343 assertions)**.

@@ -1145,7 +1145,7 @@ The **Student Financial Flight Plan** is the flagship Task-completion artefact: 
 - Human-in-the-loop for every mutation: expiring single-use confirmation, before-state snapshots with stale-state rejection, deletion-specific confirmation, and an argument-free audit trail.
 - Honest, privacy-safe disclosure: privacy labels, memory consent, and a documented list of residual risks.
 
-Compliance posture is **self-assessed** in `docs/SECURITY.md`; no third-party certification exists.
+Compliance posture is **self-assessed** in `SECURITY.md`; no third-party certification exists.
 
 ### L.3 Innovation & interaction (30 %)
 
@@ -1167,12 +1167,12 @@ Atlas demonstrates that an AI assistant can be *useful and accountable* in a fin
 
 | Document | Relationship to this file |
 | --- | --- |
-| [`README.md`](../README.md) | Product summary, setup, deployment and quality-check commands. §B/§K/§J align with it. |
-| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Application flow, auth boundaries, AI provider, money methodology, persistence. §B/§C/§F/§G expand it. |
-| [`docs/SECURITY.md`](SECURITY.md) | Security self-assessment and residual risks. §I consolidates it into a threat/mitigation table. Note: that file states PHP/Composer were unavailable in its audit environment; in this task they **were** available and the tests were re-run. |
-| [`docs/DEMO.md`](DEMO.md) | Under-10-minute demo flow and evidence checklist. §A/§E/§L support it. |
-| [`docs/PRESENTATION.md`](PRESENTATION.md) | Slide source and speaker script. §A/§E/§L support it. |
-| [`GlobeNest-Atlas-Submission-Checklist.md`](../GlobeNest-Atlas-Submission-Checklist.md) | Capability/evidence matrix and older audit record (77/719 and 148/1251, 2026-10-18). §J reports the newer 90/811 and 161/1343, **verified** on `main` at `c44a0e2`. |
+| [`README.md`](README.md) | Product summary, setup, deployment and quality-check commands. §B/§K/§J align with it. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Application flow, auth boundaries, AI provider, money methodology, persistence. §B/§C/§F/§G expand it. |
+| [`SECURITY.md`](SECURITY.md) | Security self-assessment and residual risks. §I consolidates it into a threat/mitigation table. Note: that file states PHP/Composer were unavailable in its audit environment; in this task they **were** available and the tests were re-run. |
+| [`DEMO.md`](DEMO.md) | Under-10-minute demo flow and evidence checklist. §A/§E/§L support it. |
+| [`PRESENTATION.md`](PRESENTATION.md) | Slide source and speaker script. §A/§E/§L support it. |
+| [`GlobeNest-Atlas-Submission-Checklist.md`](GlobeNest-Atlas-Submission-Checklist.md) | Capability/evidence matrix and older audit record (77/719 and 148/1251, 2026-10-18). §J reports the newer 90/811 and 161/1343, **verified** on `main` at `c44a0e2`. |
 
 ### Reconciliation notes
 

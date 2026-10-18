@@ -4,6 +4,15 @@ GlobeNest Atlas is a Laravel financial-planning workspace for international stud
 
 Atlas is a planning prototype, not a bank, remittance provider or regulated financial adviser. It does not connect to bank accounts or move money.
 
+## Competition materials and project documentation
+
+- [Technical documentation: architecture, algorithms, AI-agent design, security and verification](TECHNICAL-DOCUMENTATION.md)
+- [System architecture and calculation methodology](ARCHITECTURE.md)
+- [Security self-assessment and residual risks](SECURITY.md)
+- [Under-10-minute demo and evidence checklist](DEMO.md)
+- [8-slide presentation source and speaker script](PRESENTATION.md)
+- [Competition submission checklist and current evidence status](GlobeNest-Atlas-Submission-Checklist.md)
+
 ## What works
 
 - Account registration, throttled sign-in, logout, private sessions and a student profile.
@@ -37,7 +46,7 @@ Atlas is a planning prototype, not a bank, remittance provider or regulated fina
 | AI | Real OpenRouter (default) or opt-in Groq integration when configured. The API key and model are server-side only. |
 | Calculations | Deterministic application code; the AI provider does not calculate or query the database directly. |
 
-This release does not include a live rate provider, verified remittance-provider API, bank connectivity, scholarship search or eligibility verification, authenticated password-change flow, authenticator-app MFA, or production operational monitoring. Registration email verification and password recovery by email OTP are implemented in source; their real delivery depends on a correctly configured SMTP service and has not been verified live. Review `docs/SECURITY.md` before deployment.
+This release does not include a live rate provider, verified remittance-provider API, bank connectivity, scholarship search or eligibility verification, authenticated password-change flow, authenticator-app MFA, or production operational monitoring. Registration email verification and password recovery by email OTP are implemented in source; their real delivery depends on a correctly configured SMTP service and has not been verified live. Review `SECURITY.md` before deployment.
 
 AI connectivity depends on a server-side API key, model availability, account status, and tool-calling support. OpenRouter is the default. `openrouter/free` and `openrouter/auto` are deliberately rejected because they can route to different models. Run `php artisan openrouter:test` or `php artisan groq:test` for the selected provider to request one minimal synthetic function call; these checks validate the function name and token without executing an application tool, printing the API key, or showing generated content. Automated tests fake providers and do not require paid API calls. A successful mocked test is not proof of live connectivity or free quota.
 
@@ -162,12 +171,3 @@ Deploy the Laravel application to a PHP-capable host with managed MySQL; a stati
 - Enable HTTPS, redirect HTTP, use a restrictive host/network policy, and keep PHP/Laravel/dependencies patched.
 - No queue worker, file upload, or public storage is required by the current features. If queues are added later, configure a persistent queue and worker.
 - Use `php artisan config:cache` and `php artisan view:cache` as appropriate for the host. Do not cache configuration before production environment values are present.
-
-## Competition materials
-
-- [Technical documentation: architecture, algorithms, AI-agent design, security and verification](docs/TECHNICAL-DOCUMENTATION.md)
-- [System architecture and calculation methodology](docs/ARCHITECTURE.md)
-- [Security self-assessment and residual risks](docs/SECURITY.md)
-- [Under-10-minute demo and evidence checklist](docs/DEMO.md)
-- [8-slide presentation source and speaker script](docs/PRESENTATION.md)
-- [Competition submission checklist and current evidence status](GlobeNest-Atlas-Submission-Checklist.md)

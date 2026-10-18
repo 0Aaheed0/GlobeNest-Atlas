@@ -28,10 +28,10 @@ The published PBCSF International Track Appendix 2 describes the theme “AI as 
 ## Submission materials
 
 - [x] Source code and `README.md` with prerequisites, local setup, test commands and deployment notes.
-- [x] [Architecture and calculation documentation](docs/ARCHITECTURE.md).
-- [x] [Security self-assessment](docs/SECURITY.md) with residual risks and verification limits.
-- [x] [Eight-minute demo flow and evidence checklist](docs/DEMO.md).
-- [x] [Eight-slide presentation source and speaker script under ten minutes](docs/PRESENTATION.md). An editable `.pptx` is not present; the Markdown is the transfer-ready source.
+- [x] [Architecture and calculation documentation](ARCHITECTURE.md).
+- [x] [Security self-assessment](SECURITY.md) with residual risks and verification limits.
+- [x] [Eight-minute demo flow and evidence checklist](DEMO.md).
+- [x] [Eight-slide presentation source and speaker script under ten minutes](PRESENTATION.md). An editable `.pptx` is not present; the Markdown is the transfer-ready source.
 - [ ] Confirm official submission channel, deadline and whether demo video is required as execution evidence.
 - [ ] Collect synthetic-account/sandbox operation logs and the required evidence package. Do not fabricate output or include secrets/real personal data.
 - [ ] Optional demo video, maximum five minutes, unless organizers confirm it is mandatory for the selected evidence submission.
