@@ -18,7 +18,9 @@ function setTheme(theme, persist = false) {
 
     document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
         const nextTheme = normalizedTheme === 'dark' ? 'light' : 'dark';
-        button.textContent = normalizedTheme === 'dark' ? 'Light' : 'Dark';
+        if (!button.classList.contains('theme-toggle-icon')) {
+            button.textContent = normalizedTheme === 'dark' ? 'Light' : 'Dark';
+        }
         button.setAttribute('aria-label', `Switch to ${nextTheme} theme`);
         button.setAttribute('aria-pressed', String(normalizedTheme === 'light'));
     });
@@ -37,6 +39,132 @@ setTheme(readThemePreference() || systemTheme);
 document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
     button.addEventListener('click', () => {
         setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+    });
+});
+
+document.querySelectorAll('[data-confirm-logout]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+        if (!window.confirm('Do you want to log out and return to the welcome page?')) {
+            event.preventDefault();
+        }
+    });
+});
+
+const reducedMotionPreference = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+const revealTargetSelector = [
+    '.landing-hero .hero-copy',
+    '.landing-hero .hero-visual',
+    '.value-strip > div',
+    '.principles-inner',
+    '.auth-card',
+    '.page-heading',
+    '.metric-card',
+    '.resilience-card',
+    '.content-wrap > .panel',
+    '.dashboard-grid > .panel',
+    '.tools-grid > .panel',
+    '.commitment',
+    '.goal-item',
+    '.budget-line',
+    '.financial-alert',
+    '.pending-approval',
+    '.funding-item',
+    '.forecast-card',
+].join(', ');
+
+let scrollRevealObserver = null;
+
+function scrollRevealRegionContains(element) {
+    const bounds = element.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const verticalInset = viewportWidth * 0.08;
+    const horizontalInset = viewportWidth * 0.03;
+
+    return bounds.bottom > verticalInset
+        && bounds.top < window.innerHeight - verticalInset
+        && bounds.right > horizontalInset
+        && bounds.left < window.innerWidth - horizontalInset;
+}
+
+function registerScrollRevealTargets(root = document) {
+    if (!scrollRevealObserver || reducedMotionPreference?.matches) return;
+
+    try {
+        const rootIsTarget = root.nodeType === Node.ELEMENT_NODE && root.matches(revealTargetSelector);
+        const targets = [
+            ...(rootIsTarget ? [root] : []),
+            ...root.querySelectorAll(revealTargetSelector),
+        ];
+
+        targets.forEach((element) => {
+            if (element.hasAttribute('data-scroll-reveal')) return;
+
+            const siblingIndex = Array.from(element.parentElement?.children || []).indexOf(element);
+            element.style.setProperty('--reveal-delay', `${Math.min(Math.max(siblingIndex, 0), 3) * 40}ms`);
+            element.dataset.scrollReveal = scrollRevealRegionContains(element) ? 'visible' : 'pending';
+            scrollRevealObserver.observe(element);
+        });
+
+        return true;
+    } catch {
+        disableScrollReveal();
+        return false;
+    }
+}
+
+function disableScrollReveal() {
+    scrollRevealObserver?.disconnect();
+    scrollRevealObserver = null;
+    document.documentElement.removeAttribute('data-motion-ready');
+    document.querySelectorAll('[data-scroll-reveal]').forEach((element) => {
+        element.removeAttribute('data-scroll-reveal');
+        element.style.removeProperty('--reveal-delay');
+    });
+}
+
+function initializeScrollReveal() {
+    if (reducedMotionPreference?.matches || !('IntersectionObserver' in window)) return;
+
+    try {
+        scrollRevealObserver = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                const targetHasFocus = entry.target.contains(document.activeElement);
+                entry.target.dataset.scrollReveal = targetHasFocus || entry.isIntersecting ? 'visible' : 'pending';
+            });
+        }, { threshold: 0, rootMargin: '-8% -3%' });
+
+        if (!registerScrollRevealTargets()) return;
+        document.documentElement.dataset.motionReady = 'true';
+    } catch {
+        disableScrollReveal();
+    }
+}
+
+document.addEventListener('focusin', (event) => {
+    const focusedReveal = event.target.closest?.('[data-scroll-reveal]');
+    if (focusedReveal) focusedReveal.dataset.scrollReveal = 'visible';
+});
+
+reducedMotionPreference?.addEventListener?.('change', (event) => {
+    if (event.matches) {
+        disableScrollReveal();
+        return;
+    }
+
+    initializeScrollReveal();
+});
+
+initializeScrollReveal();
+
+// Password visibility toggle helper
+document.querySelectorAll('[data-toggle-password]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        const inputId = btn.dataset.togglePassword;
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        btn.textContent = isPassword ? '👁‍🗨' : '👁';
     });
 });
 
@@ -74,7 +202,9 @@ async function postJson(url, values) {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
         const validationMessage = result.errors ? Object.values(result.errors).flat()[0] : null;
-        throw new Error(validationMessage || result.message || 'That request could not be completed. Please try again.');
+        const error = new Error(validationMessage || result.message || 'That request could not be completed. Please try again.');
+        error.refresh = result.refresh === true;
+        throw error;
     }
     return result;
 }
@@ -149,8 +279,8 @@ const convertResult = document.querySelector('#convert-result');
 attachAsyncForm('#convert-form', app.dataset.currencyEndpoint, (result) => {
     resultBox(
         convertResult,
-        `${result.to_currency} ${result.converted_amount}`,
-        `${result.amount} ${result.from_currency} × ${result.rate} · ${result.source} · calculated ${new Date(result.retrieved_at).toLocaleString()}`,
+        `${labeledCurrency(result.to_currency)} ${result.converted_amount}`,
+        `${result.amount} ${labeledCurrency(result.from_currency)} × ${result.rate} ${result.to_currency} per ${result.from_currency} · ${result.source} · calculated ${new Date(result.retrieved_at).toLocaleString()}`,
         'Indicative demonstration math only. This is not a live rate or a transfer offer.',
     );
 });
@@ -163,8 +293,8 @@ attachAsyncForm('#remittance-form', app.dataset.remittanceEndpoint, (result) => 
     result.quotes.forEach((quote) => {
         const row = makeElement('div', 'quote-row');
         row.append(makeElement('b', '', `#${quote.rank} · ${quote.name}`));
-        row.append(makeElement('strong', '', `${result.reference.to_currency} ${quote.recipient_amount} received`));
-        row.append(makeElement('small', '', `Fee ${quote.fee} ${quote.fee_currency} · ${quote.delivery_estimate} · ${quote.limitation}`));
+        row.append(makeElement('strong', '', `${labeledCurrency(result.reference.to_currency)} ${quote.recipient_amount} estimated recipient amount`));
+        row.append(makeElement('small', '', `Fee ${quote.fee} ${labeledCurrency(quote.fee_currency)} · ${quote.delivery_estimate} · ${quote.limitation}`));
         list.append(row);
     });
     remittanceResult.append(list);
@@ -183,12 +313,12 @@ attachAsyncForm('#scenario-form', app.dataset.scenarioEndpoint, (result) => {
     scenarioResult.replaceChildren();
     scenarioResult.classList.remove('hidden');
     const cards = [
-        ['Monthly remaining', `${result.budget_currency} ${result.budget.projected_remaining} · ${result.budget.status.replace('_', ' ')}`],
-        ['Tuition saving pace', `${result.budget_currency} ${result.budget.required_tuition_savings} / month · ${result.budget_currency} ${result.budget.tuition_savings_gap} short`],
-        ['Recipient under rate scenario', `${result.exchange.to_currency} ${result.exchange.scenario_amount}`],
+        ['Monthly remaining', `${labeledCurrency(result.budget_currency)} ${result.budget.projected_remaining} · ${result.budget.status.replace('_', ' ')}`],
+        ['Tuition saving pace', `${labeledCurrency(result.budget_currency)} ${result.budget.required_tuition_savings} / month · ${labeledCurrency(result.budget_currency)} ${result.budget.tuition_savings_gap} short`],
+        ['Recipient under rate scenario', `${labeledCurrency(result.exchange.to_currency)} ${result.exchange.scenario_amount}`],
     ];
     const nextInstallment = result.installments.find((installment) => installment.status !== 'funded');
-    if (nextInstallment) cards.push(['Next tuition installment', `${result.exchange.from_currency} ${nextInstallment.amount} · ${new Date(`${nextInstallment.due_date}T00:00:00`).toLocaleDateString()}`]);
+    if (nextInstallment) cards.push(['Next tuition installment', `${labeledCurrency(result.exchange.from_currency)} ${nextInstallment.amount} · ${new Date(`${nextInstallment.due_date}T00:00:00`).toLocaleDateString()}`]);
     cards.forEach(([label, value]) => {
         const card = makeElement('div');
         card.append(makeElement('small', '', label), makeElement('b', '', value));
@@ -199,9 +329,9 @@ attachAsyncForm('#scenario-form', app.dataset.scenarioEndpoint, (result) => {
         const card = makeElement('article', `forecast-card forecast-${forecast.name.toLowerCase()}`);
         card.append(
             makeElement('div', 'forecast-heading', `${forecast.name} · ${forecast.rate_change_percent > 0 ? '+' : ''}${forecast.rate_change_percent}% FX`),
-            makeElement('small', '', `Projected tuition fund · ${result.budget_currency}`),
-            makeElement('strong', '', `${result.budget_currency} ${forecast.projected_tuition_fund}`),
-            makeElement('small', '', `Tuition shortfall · ${result.budget_currency} ${forecast.tuition_shortfall}`),
+            makeElement('small', '', `Projected tuition fund · ${labeledCurrency(result.budget_currency)}`),
+            makeElement('strong', '', `${labeledCurrency(result.budget_currency)} ${forecast.projected_tuition_fund}`),
+            makeElement('small', '', `Tuition shortfall · ${labeledCurrency(result.budget_currency)} ${forecast.tuition_shortfall}`),
         );
         const progress = makeElement('div', 'forecast-progress');
         const bar = makeElement('i');
@@ -217,12 +347,13 @@ attachAsyncForm('#scenario-form', app.dataset.scenarioEndpoint, (result) => {
         progress.append(bar);
         card.append(progress);
         card.append(
-            makeElement('small', '', `Contributions ${result.budget_currency} ${forecast.total_contributions} · cumulative net cash flow ${result.budget_currency} ${forecast.projected_cash_flow}`),
+            makeElement('small', '', `Contributions ${labeledCurrency(result.budget_currency)} ${forecast.total_contributions} · cumulative net cash flow ${labeledCurrency(result.budget_currency)} ${forecast.projected_cash_flow}`),
             makeElement('small', '', forecast.scholarship_received ? 'Includes the unconfirmed scholarship assumption.' : 'Scholarship not counted within this forecast.'),
         );
         forecastGrid.append(card);
     });
     scenarioResult.append(forecastGrid);
+    registerScrollRevealTargets(forecastGrid);
     const assumptions = result.forecast_assumptions;
     const conversion = assumptions.tuition_conversion;
     scenarioResult.append(makeElement(
@@ -284,6 +415,51 @@ function labeledCurrency(code) {
     return `${code} — ${currencyNames[code] || 'currency name unavailable'}`;
 }
 
+function appendDecisionReceipt(container, receipt) {
+    if (!receipt || typeof receipt !== 'object') return;
+
+    const details = makeElement('details', 'decision-receipt');
+    details.append(makeElement('summary', '', 'Explainable decision receipt'));
+    details.append(makeElement('p', 'receipt-source', receipt.source || 'Server-side tool result'));
+
+    const addList = (heading, values) => {
+        if (!Array.isArray(values) || values.length === 0) return;
+        const section = makeElement('div', 'receipt-section');
+        section.append(makeElement('b', '', heading));
+        const list = makeElement('ul');
+        values.forEach((value) => list.append(makeElement('li', '', String(value))));
+        section.append(list);
+        details.append(section);
+    };
+
+    addList('Authorized inputs', receipt.inputs);
+    details.append(makeElement('p', 'receipt-calculation', receipt.calculation || 'No calculation details were returned.'));
+    addList('Assumptions & limitations', receipt.assumptions);
+    details.append(makeElement('p', 'receipt-result', receipt.result || 'No result was returned.'));
+
+    if (Array.isArray(receipt.proposed_changes) && receipt.proposed_changes.length > 0) {
+        const changes = makeElement('dl', 'receipt-changes');
+        receipt.proposed_changes.forEach((change) => {
+            const row = makeElement('div', 'receipt-change');
+            row.append(
+                makeElement('dt', '', change.field),
+                makeElement('dd', '', `Current: ${change.current} · Proposed: ${change.proposed}`),
+            );
+            changes.append(row);
+        });
+        details.append(changes);
+    }
+
+    details.append(makeElement(
+        'p',
+        receipt.approval_required ? 'receipt-approval required' : 'receipt-approval',
+        receipt.approval_required
+            ? 'Explicit approval is still required. Nothing has been saved.'
+            : 'No approval is pending for this result.',
+    ));
+    container.append(details);
+}
+
 function appendMessage(role, content) {
     if (!chatMessages) return null;
     chatMessages.querySelector('.chat-welcome')?.remove();
@@ -309,19 +485,41 @@ function appendActionSummary(container, action) {
         rows.push(['Target amount', amount(argumentsData.target_amount, argumentsData.currency)]);
         rows.push(['Already saved', amount(argumentsData.current_amount || '0.00', argumentsData.currency)]);
         if (argumentsData.target_date) rows.push(['Target date', argumentsData.target_date]);
+    } else if (action.name === 'create_tuition_plan') {
+        rows.push(['New tuition plan', argumentsData.title]);
+        rows.push(['Total tuition', amount(argumentsData.amount, argumentsData.currency)]);
+        rows.push(['Already saved', amount(argumentsData.saved_amount || '0.00', argumentsData.currency)]);
+        rows.push(['Due date', argumentsData.due_date]);
+        rows.push(['Installments', String(argumentsData.installments || 1)]);
     } else if (action.name === 'create_budget') {
         rows.push(['Monthly category budget', argumentsData.category]);
         rows.push(['Monthly limit', amount(argumentsData.amount, argumentsData.currency)]);
+    } else if (action.name === 'delete_tuition_plan') {
+        rows.push(['Delete tuition plan', `#${before.id} · ${before.title}`]);
+        rows.push(['Tuition amount', amount(before.amount, before.currency)]);
+        rows.push(['Recorded savings', amount(before.saved_amount, before.currency)]);
+        rows.push(['Due date', before.due_date]);
+        rows.push(['Installments', String(before.installments)]);
+    } else if (action.name === 'delete_savings_goal') {
+        rows.push(['Delete savings goal', `#${before.id} · ${before.title}`]);
+        rows.push(['Target amount', amount(before.target_amount, before.currency)]);
+        rows.push(['Recorded progress', amount(before.current_amount, before.currency)]);
+        if (before.target_date) rows.push(['Target date', before.target_date]);
+    } else if (action.name === 'delete_budget') {
+        rows.push(['Delete monthly budget', `#${before.id} · ${before.category}`]);
+        rows.push(['Monthly limit', amount(before.amount, before.currency)]);
+        rows.push(['Period', `${before.period_start} to ${before.period_end}`]);
     } else if (action.name === 'save_plan') {
         rows.push(['New planning note', argumentsData.title]);
         rows.push(['Summary', argumentsData.summary]);
     } else if (action.name === 'update_savings_goal') {
-        rows.push(['Savings goal', before.title]);
+        rows.push(['Savings goal', `#${before.id} · ${before.title}`]);
         rows.push(['Current target', amount(before.target_amount, before.currency)]);
-        rows.push(['Proposed target', amount(argumentsData.target_amount, before.currency)]);
-        rows.push(['Saved progress remains', amount(before.current_amount, before.currency)]);
+        rows.push(['Proposed target', amount(argumentsData.target_amount || before.target_amount, before.currency)]);
+        rows.push(['Current saved progress', amount(before.current_amount, before.currency)]);
+        rows.push(['Proposed saved progress', amount(argumentsData.current_amount || before.current_amount, before.currency)]);
     } else if (action.name === 'update_tuition_plan') {
-        rows.push(['Tuition plan', before.title]);
+        rows.push(['Tuition plan', `#${before.id} · ${before.title}`]);
         rows.push(['Current tuition amount', amount(before.amount, before.currency)]);
         rows.push(['Proposed tuition amount', amount(argumentsData.amount || before.amount, before.currency)]);
         rows.push(['Current recorded savings', amount(before.saved_amount, before.currency)]);
@@ -330,6 +528,12 @@ function appendActionSummary(container, action) {
         rows.push(['Proposed due date', argumentsData.due_date || before.due_date]);
         rows.push(['Current installments', String(before.installments)]);
         rows.push(['Proposed installments', String(argumentsData.installments || before.installments)]);
+    } else if (action.name === 'update_budget') {
+        rows.push(['Budget record', `#${before.id} · ${before.category}`]);
+        rows.push(['Current monthly limit', amount(before.amount, before.currency)]);
+        rows.push(['Proposed category', argumentsData.category || before.category]);
+        rows.push(['Proposed monthly limit', amount(argumentsData.amount || before.amount, argumentsData.currency || before.currency)]);
+        rows.push(['Budget period', `${before.period_start} to ${before.period_end}`]);
     }
 
     const details = makeElement('dl', 'action-summary');
@@ -340,16 +544,35 @@ function appendActionSummary(container, action) {
     });
     container.append(details);
     const notice = action.status === 'confirmed'
-        ? 'This confirmed change was saved only to your Atlas account. No payment was authorized or made.'
+        ? (action.name?.startsWith('delete_')
+            ? 'This record was deleted only from your Atlas account after your confirmation. No payment was authorized or made.'
+            : 'This confirmed change was saved only to your Atlas account. No payment was authorized or made.')
         : action.status === 'cancelled' || action.status === 'expired'
             ? 'No planning changes were saved. This draft cannot be used again.'
             : 'Confirming saves only this displayed change to your Atlas account. It does not authorize a payment or move money.';
     container.append(makeElement('p', 'action-disclaimer', notice));
 }
 
+function confirmDeletion(action) {
+    if (!action?.name?.startsWith('delete_')) return true;
+    const before = action.before_state || {};
+    const name = action.name === 'delete_tuition_plan'
+        ? 'tuition plan'
+        : action.name === 'delete_savings_goal'
+            ? 'savings goal'
+            : 'monthly budget';
+    const title = before.title || before.category || 'record';
+
+    return window.confirm(`Permanently delete ${name} #${before.id} (${title})? This cannot be undone.`);
+}
+
 function describeSavedOutcome(outcome) {
     if (!outcome || typeof outcome !== 'object') return '';
     const title = outcome.title || outcome.category || 'Planning record';
+
+    if (typeof outcome.record_type === 'string' && outcome.record_type.startsWith('deleted_')) {
+        return `${title} (#${outcome.id}) was deleted from your Atlas account. No payment was made.`;
+    }
 
     if (outcome.record_type === 'savings_goal') {
         return `${title}: target ${labeledCurrency(outcome.currency)} ${outcome.target_amount}; saved progress ${labeledCurrency(outcome.currency)} ${outcome.current_amount}.`;
@@ -380,7 +603,7 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
         const action = entry.pending_action;
         if (action) {
             const statusTitle = action.status === 'confirmed'
-                ? 'Change saved to your account'
+                ? (action.name?.startsWith('delete_') ? 'Record deleted from your account' : 'Change saved to your account')
                 : action.status === 'cancelled'
                     ? 'Change discarded'
                     : action.status === 'expired'
@@ -393,13 +616,16 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
                 card.append(makeElement('p', 'result-detail', describeSavedOutcome(action.outcome)));
             }
         } else {
-            card.append(makeElement('b', '', 'Atlas calculation'));
+            card.append(makeElement('b', '', 'Atlas tool result'));
             card.append(makeElement('p', 'result-detail', entry.summary));
         }
+        appendDecisionReceipt(card, entry.receipt);
         if (canConfirm && action && !action.status) {
-            const confirmButton = makeElement('button', 'button button-primary', 'Confirm and save');
+            const isDeletion = action.name?.startsWith('delete_');
+            const confirmButton = makeElement('button', 'button button-primary', isDeletion ? 'Confirm deletion' : 'Confirm and save');
             confirmButton.type = 'button';
             confirmButton.addEventListener('click', async () => {
+                if (!confirmDeletion(action)) return;
                 confirmButton.disabled = true;
                 try {
                     const saved = await postJson(app.dataset.confirmEndpoint, {
@@ -407,7 +633,7 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
                         pending_action_id: action.id,
                         confirmed: true,
                     });
-                    confirmButton.textContent = 'Saved';
+                    confirmButton.textContent = isDeletion ? 'Deleted' : 'Saved';
                     discardButton.disabled = true;
                     card.append(makeElement('div', 'result-detail', saved.message));
                     showToast(saved.message);
@@ -415,6 +641,12 @@ function addToolResults(results, pendingActions = [], canConfirm = false, afterM
                     if (conversationId) url.searchParams.set('conversation_id', conversationId);
                     window.location.assign(url.toString());
                 } catch (error) {
+                    if (error.refresh) {
+                        const url = new URL(window.location.href);
+                        if (conversationId) url.searchParams.set('conversation_id', conversationId);
+                        window.location.assign(url.toString());
+                        return;
+                    }
                     confirmButton.disabled = false;
                     showToast(error.message, true);
                 }
@@ -551,11 +783,56 @@ document.querySelectorAll('[data-load-conversation]').forEach((button) => {
                     addToolResults(message.tool_result, [], false, renderedMessage);
                 }
             });
-            document.querySelectorAll('.conversation-item').forEach((item) => item.classList.toggle('selected', item === button));
+            document.querySelectorAll('.conversation-row, .conversation-item').forEach((item) => {
+                item.classList.toggle('selected', item === button || item.contains(button));
+            });
             document.querySelector('#assistant')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         } catch (error) {
             showToast(error.message, true);
         } finally {
+            button.disabled = false;
+        }
+    });
+});
+
+document.querySelectorAll('[data-delete-conversation]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const convId = button.dataset.deleteConversation;
+        if (!confirm('Are you sure you want to delete this conversation?')) return;
+
+        button.disabled = true;
+        try {
+            const response = await fetch(`/agent/conversations/${encodeURIComponent(convId)}`, {
+                method: 'DELETE',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': csrfToken,
+                },
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || 'Failed to delete conversation.');
+
+            const row = button.closest('[data-conversation-row]') || button.closest('.conversation-item');
+            row?.remove();
+
+            if (conversationId === String(convId)) {
+                conversationId = '';
+                if (chatMessages) {
+                    chatMessages.dataset.conversationId = '';
+                    chatMessages.replaceChildren();
+                    const welcome = makeElement('div', 'chat-welcome');
+                    welcome.append(
+                        makeElement('span', 'welcome-spark', '✳'),
+                        makeElement('h3', '', 'What’s on your mind?'),
+                        makeElement('p', '', 'Send a question to start a new private conversation.')
+                    );
+                    chatMessages.append(welcome);
+                }
+            }
+            showToast('Conversation deleted.');
+        } catch (error) {
+            showToast(error.message, true);
             button.disabled = false;
         }
     });
@@ -566,6 +843,18 @@ document.querySelectorAll('[data-approve-pending], [data-reject-pending]').forEa
         const approval = button.closest('[data-pending-approval]');
         const isApproval = button.hasAttribute('data-approve-pending');
         const actionId = button.dataset.approvePending || button.dataset.rejectPending;
+        if (isApproval) {
+            const summary = approval?.querySelector('[data-pending-action]');
+
+            try {
+                const action = JSON.parse(summary?.dataset.pendingAction || '{}');
+
+                if (!confirmDeletion(action)) return;
+            } catch {
+                showToast('The deletion target could not be verified. Reload before confirming.', true);
+                return;
+            }
+        }
         const controls = approval?.querySelectorAll('button') || [button];
         controls.forEach((control) => { control.disabled = true; });
 
@@ -580,6 +869,12 @@ document.querySelectorAll('[data-approve-pending], [data-reject-pending]').forEa
             url.searchParams.set('conversation_id', button.dataset.conversationId);
             window.location.assign(url.toString());
         } catch (error) {
+            if (isApproval && error.refresh) {
+                const url = new URL(window.location.href);
+                url.searchParams.set('conversation_id', button.dataset.conversationId);
+                window.location.assign(url.toString());
+                return;
+            }
             controls.forEach((control) => { control.disabled = false; });
             showToast(error.message, true);
         }

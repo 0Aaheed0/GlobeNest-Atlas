@@ -21,6 +21,8 @@ class FinancialPlannerTest extends TestCase
         $result = app(FinancialPlanner::class)->tuitionSchedule('1200.00', '0.00', '2026-04-01');
 
         $this->assertSame(90, $result['due_in_days']);
+        $this->assertSame(13, $result['weeks_available']);
+        $this->assertSame(3, $result['months_available']);
         $this->assertSame('92.31', $result['required_weekly']);
         $this->assertSame('400.00', $result['required_monthly']);
         $this->assertSame('on_track', $result['status']);
@@ -98,6 +100,8 @@ class FinancialPlannerTest extends TestCase
         $this->assertSame(['790.00', '800.00', '810.00'], array_column($forecasts, 'projected_tuition_fund'));
         $this->assertSame('400.00', $forecasts[1]['total_contributions']);
         $this->assertSame('-440.00', $forecasts[1]['projected_cash_flow']);
+        $this->assertSame(1, $forecasts[1]['first_cash_flow_shortfall_month']);
+        $this->assertSame(1, $forecasts[1]['first_tuition_contribution_gap_month']);
         $this->assertTrue($forecasts[1]['scholarship_received']);
     }
 
@@ -111,6 +115,8 @@ class FinancialPlannerTest extends TestCase
 
         $this->assertFalse($forecasts[1]['scholarship_received']);
         $this->assertSame('300.00', $forecasts[1]['projected_tuition_fund']);
+        $this->assertNull($forecasts[1]['first_cash_flow_shortfall_month']);
+        $this->assertNull($forecasts[1]['first_tuition_contribution_gap_month']);
 
         $this->expectException(\InvalidArgumentException::class);
         $planner->forecastScenarios(

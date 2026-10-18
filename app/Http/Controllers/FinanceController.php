@@ -6,15 +6,19 @@ use App\Models\AgentMessage;
 use App\Models\Budget;
 use App\Models\FundingOpportunity;
 use App\Models\SavingsGoal;
+use App\Models\StudentProfile;
+use App\Models\Transaction;
 use App\Models\TuitionPlan;
 use App\Models\User;
 use App\Services\AgentToolDisplayPresenter;
 use App\Services\CurrencyCalculator;
 use App\Services\ExchangeRateService;
 use App\Services\FinancialPlanner;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -27,7 +31,7 @@ class FinanceController extends Controller
         return view('landing');
     }
 
-    public function dashboard(Request $request, FinancialPlanner $planner, AgentToolDisplayPresenter $toolPresenter): View
+    public function dashboard(Request $request, FinancialPlanner $planner, AgentToolDisplayPresenter $toolPresenter, CurrencyCalculator $calculator): View
     {
         /** @var User $user */
         $user = $request->user();
@@ -198,14 +202,33 @@ class FinanceController extends Controller
             }
         }
 
+        $fundingOpportunities = $user->fundingOpportunities()
+            ->orderByRaw('deadline IS NULL')
+            ->orderBy('deadline')
+            ->latest()
+            ->limit(12)
+            ->get();
+        $readinessSnapshot = $this->financialReadinessSnapshot(
+            $profile,
+            $monthTransactions,
+            $tuition,
+            $goals,
+            $monthlyBudgets,
+            $fundingOpportunities,
+            $planner,
+            $calculator,
+            $spentMinor,
+        );
+
         return view('atlas', [
             'profile' => $profile,
             'transactions' => $transactions,
             'tuitionPlans' => $tuition,
             'goals' => $goals,
             'budgets' => $monthlyBudgets,
-            'fundingOpportunities' => $user->fundingOpportunities()->orderByRaw('deadline IS NULL')->orderBy('deadline')->latest()->limit(12)->get(),
+            'fundingOpportunities' => $fundingOpportunities,
             'financialAlerts' => $financialAlerts,
+            'readinessSnapshot' => $readinessSnapshot,
             'pendingActions' => $user->agentPendingActions()
                 ->where('status', 'pending')
                 ->where('expires_at', '>', now())
@@ -239,6 +262,319 @@ class FinanceController extends Controller
             'currencyNames' => app(ExchangeRateService::class)->currencyNames(),
             'selectedConversation' => $selectedConversation,
         ]);
+    }
+
+    /**
+     * @param  Collection<int, array{plan: TuitionPlan, schedule: array<string, mixed>, installments: array<int, array<string, mixed>>, progress: int}>  $tuition
+     * @param  EloquentCollection<int, Transaction>  $monthTransactions
+     * @return array<string, mixed>
+     */
+    private function financialReadinessSnapshot(
+        ?StudentProfile $profile,
+        EloquentCollection $monthTransactions,
+        Collection $tuition,
+        Collection $goals,
+        Collection $monthlyBudgets,
+        EloquentCollection $fundingOpportunities,
+        FinancialPlanner $planner,
+        CurrencyCalculator $calculator,
+        int $spentMinor,
+    ): array {
+        $homeCurrency = $profile?->home_currency;
+        $tuitionItems = $tuition->map(function (array $item) use ($calculator, $homeCurrency): array {
+            $plan = $item['plan'];
+            $conversion = null;
+
+            if ($homeCurrency !== null && $plan->currency !== $homeCurrency && $item['schedule']['remaining'] !== '0.00') {
+                $conversion = $calculator->convert($item['schedule']['remaining'], $plan->currency, $homeCurrency);
+            }
+
+            return [
+                'title' => $plan->title,
+                'currency' => $plan->currency,
+                'total' => (string) $plan->amount,
+                'saved' => (string) $plan->saved_amount,
+                'remaining' => $item['schedule']['remaining'],
+                'due_date' => $plan->due_date->toDateString(),
+                'due_in_days' => $item['schedule']['due_in_days'],
+                'status' => $item['schedule']['status'],
+                'weeks_available' => $item['schedule']['weeks_available'],
+                'months_available' => $item['schedule']['months_available'],
+                'required_monthly' => $item['schedule']['required_monthly'],
+                'required_weekly' => $item['schedule']['required_weekly'],
+                'home_equivalent' => $conversion['converted_amount'] ?? null,
+                'conversion' => $conversion,
+                'formula' => 'Outstanding tuition = max(0, total tuition − recorded saved amount). Monthly and weekly saving targets use the existing deadline schedule and round upward to cents.',
+            ];
+        })->values();
+
+        $savingsGoals = $goals->map(function (array $item): array {
+            /** @var SavingsGoal $goal */
+            $goal = $item['goal'];
+            $targetMinor = CurrencyCalculator::toMinorUnits((string) $goal->target_amount);
+            $currentMinor = CurrencyCalculator::toMinorUnits((string) $goal->current_amount);
+
+            return [
+                'title' => $goal->title,
+                'currency' => $goal->currency,
+                'target' => (string) $goal->target_amount,
+                'saved' => (string) $goal->current_amount,
+                'remaining' => CurrencyCalculator::formatMinorUnits(max(0, $targetMinor - $currentMinor)),
+                'target_date' => $goal->target_date?->toDateString(),
+                'progress' => $item['progress'],
+            ];
+        })->values();
+        $categoryBudgets = $monthlyBudgets->map(function (array $item): array {
+            /** @var Budget $budget */
+            $budget = $item['budget'];
+
+            return [
+                'category' => $budget->category,
+                'currency' => $budget->currency,
+                'limit' => (string) $budget->amount,
+                'spent' => $item['spent'],
+                'remaining' => $item['remaining'],
+                'over_budget' => CurrencyCalculator::formatMinorUnits($item['over_budget']),
+                'period_start' => $budget->period_start->toDateString(),
+                'period_end' => $budget->period_end->toDateString(),
+            ];
+        })->values();
+        $fundingEntries = $fundingOpportunities->map(fn (FundingOpportunity $opportunity): array => [
+            'title' => $opportunity->title,
+            'provider' => $opportunity->provider,
+            'potential_amount' => $opportunity->potential_amount === null ? null : (string) $opportunity->potential_amount,
+            'currency' => $opportunity->currency,
+            'deadline' => $opportunity->deadline?->toDateString(),
+            'status' => $opportunity->status,
+            'user_entered' => true,
+            'counted_as_confirmed_funding' => false,
+        ])->values();
+
+        $foreignTuition = $tuitionItems->filter(fn (array $item): bool => $homeCurrency !== null
+            && $item['currency'] !== $homeCurrency
+            && $item['remaining'] !== '0.00')->values();
+        $homeCurrencyExpenseCount = $homeCurrency === null ? 0 : $monthTransactions
+            ->filter(fn ($transaction): bool => $transaction->kind === 'expense' && $transaction->currency === $homeCurrency)
+            ->count();
+        $projectionMissing = [];
+
+        if ($profile === null) {
+            $projectionMissing[] = 'A saved home-currency budget is required.';
+        }
+
+        if ($homeCurrencyExpenseCount === 0) {
+            $projectionMissing[] = 'No current-month expense records in the home currency are available as a spending baseline.';
+        }
+
+        $hasOutstandingTuition = $tuition->contains(fn (array $item): bool => $item['schedule']['remaining'] !== '0.00');
+        $projectionPlan = $tuition->first(fn (array $item): bool => $item['schedule']['remaining'] !== '0.00' && $item['schedule']['due_in_days'] > 0);
+
+        if ($projectionPlan === null) {
+            $projectionMissing[] = $hasOutstandingTuition
+                ? 'The outstanding tuition deadline is due today or has passed; no future-to-deadline forecast is available.'
+                : 'No outstanding tuition plan is available for a savings-pace forecast.';
+        }
+
+        $informationGaps = [];
+
+        if ($profile?->monthly_income === null) {
+            $informationGaps[] = 'Expected monthly income is not saved, so no delayed-income stress scenario is calculated.';
+        }
+
+        $projection = [
+            'available' => false,
+            'missing' => $projectionMissing,
+        ];
+
+        if ($projectionMissing === [] && $projectionPlan !== null && $profile !== null) {
+            $plan = $projectionPlan['plan'];
+            $schedule = $projectionPlan['schedule'];
+            $requiredMonthly = $calculator->convert($schedule['required_monthly'], $plan->currency, $homeCurrency);
+            $target = $calculator->convert((string) $plan->amount, $plan->currency, $homeCurrency);
+            $saved = $calculator->convert((string) $plan->saved_amount, $plan->currency, $homeCurrency);
+            $forecastMonths = min(24, $schedule['months_available']);
+            $monthlyRentMinor = $homeCurrency === null ? 0 : $monthTransactions
+                ->filter(fn (Transaction $transaction): bool => $transaction->kind === 'expense'
+                    && $transaction->currency === $homeCurrency
+                    && in_array(mb_strtolower(trim($transaction->category)), ['rent', 'housing'], true))
+                ->sum(fn (Transaction $transaction): int => CurrencyCalculator::toMinorUnits((string) $transaction->amount));
+            $monthlyRent = CurrencyCalculator::formatMinorUnits($monthlyRentMinor);
+            $monthlySpending = CurrencyCalculator::formatMinorUnits($spentMinor);
+            $monthlyIncome = (string) ($profile->monthly_income ?? '0.00');
+            $runForecast = fn (int $rentChange = 0, int $incomeDelay = 0, int $rateStress = 0): array => $planner->forecastScenarios(
+                (string) $profile->monthly_budget,
+                $monthlySpending,
+                $monthlyRent,
+                $monthlyIncome,
+                $requiredMonthly['converted_amount'],
+                $target['converted_amount'],
+                $saved['converted_amount'],
+                '0.00',
+                $rentChange,
+                $incomeDelay,
+                0,
+                $forecastMonths,
+                $rateStress,
+            );
+            $baseline = $runForecast()[1];
+            $firstCashFlowShortfall = $baseline['first_cash_flow_shortfall_month'];
+            $firstTuitionContributionGap = $baseline['first_tuition_contribution_gap_month'];
+            $firstShortfallMonth = $firstCashFlowShortfall === null
+                ? $firstTuitionContributionGap
+                : ($firstTuitionContributionGap === null ? $firstCashFlowShortfall : min($firstCashFlowShortfall, $firstTuitionContributionGap));
+            $firstShortfallType = $firstShortfallMonth === null
+                ? null
+                : ($firstCashFlowShortfall !== null && $firstCashFlowShortfall <= ($firstTuitionContributionGap ?? PHP_INT_MAX)
+                    ? 'negative monthly cash flow'
+                    : 'tuition contribution gap');
+
+            $toSignedMinorUnits = fn (string $amount): int => str_starts_with($amount, '-')
+                ? -CurrencyCalculator::toMinorUnits(substr($amount, 1))
+                : CurrencyCalculator::toMinorUnits($amount);
+            $formatDifference = fn (int $minorUnits): string => ($minorUnits > 0 ? '+' : ($minorUnits < 0 ? '−' : ''))
+                .CurrencyCalculator::formatMinorUnits(abs($minorUnits));
+            $scenarioSummary = function (string $name, string $change, array $forecast) use ($baseline, $formatDifference, $toSignedMinorUnits): array {
+                $shortfallDifference = CurrencyCalculator::toMinorUnits($forecast['tuition_shortfall'])
+                    - CurrencyCalculator::toMinorUnits($baseline['tuition_shortfall']);
+                $cashFlowDifference = $toSignedMinorUnits($forecast['projected_cash_flow'])
+                    - $toSignedMinorUnits($baseline['projected_cash_flow']);
+                $cashFlowShortfall = $forecast['first_cash_flow_shortfall_month'];
+                $contributionGap = $forecast['first_tuition_contribution_gap_month'];
+                $firstScenarioShortfall = $cashFlowShortfall === null
+                    ? $contributionGap
+                    : ($contributionGap === null ? $cashFlowShortfall : min($cashFlowShortfall, $contributionGap));
+
+                return [
+                    'name' => $name,
+                    'change' => $change,
+                    'tuition_shortfall' => $forecast['tuition_shortfall'],
+                    'shortfall_change' => $name === 'Baseline' ? 'Baseline' : $formatDifference($shortfallDifference),
+                    'projected_cash_flow' => $forecast['projected_cash_flow'],
+                    'cash_flow_change' => $name === 'Baseline' ? 'Baseline' : $formatDifference($cashFlowDifference),
+                    'first_shortfall_month' => $firstScenarioShortfall,
+                ];
+            };
+            $scenarioComparisons = [
+                $scenarioSummary('Baseline', 'Current saved budget and current-month expenses repeat through the tuition deadline.', $baseline),
+            ];
+
+            if ($monthlyRentMinor > 0) {
+                $scenarioComparisons[] = $scenarioSummary(
+                    'Rent +10%',
+                    'Hypothetical 10% increase applied to recorded Rent or Housing expenses.',
+                    $runForecast(10)[1],
+                );
+            } else {
+                $informationGaps[] = 'No current-month home-currency Rent or Housing expense is recorded, so a rent-increase stress scenario is not calculated.';
+            }
+
+            if ($profile->monthly_income !== null && CurrencyCalculator::toMinorUnits($monthlyIncome) > 0) {
+                $scenarioComparisons[] = $scenarioSummary(
+                    'Income delayed 1 month',
+                    'Hypothetical first-month delay using the saved expected monthly income.',
+                    $runForecast(0, 1)[1],
+                );
+            }
+
+            if ($plan->currency !== $homeCurrency) {
+                $rateScenarios = $runForecast(0, 0, 10);
+                $scenarioComparisons[] = $scenarioSummary(
+                    'FX −10% illustration',
+                    'Favorable hypothetical change in the demonstration rate; not a market prediction.',
+                    $rateScenarios[0],
+                );
+                $scenarioComparisons[] = $scenarioSummary(
+                    'FX +10% illustration',
+                    'Adverse hypothetical change in the demonstration rate; not a market prediction.',
+                    $rateScenarios[2],
+                );
+            }
+
+            $monthlyCapacity = max(
+                0,
+                CurrencyCalculator::toMinorUnits((string) $profile->monthly_budget) - $spentMinor,
+            );
+            $monthlyContributionGap = max(
+                0,
+                CurrencyCalculator::toMinorUnits($requiredMonthly['converted_amount']) - $monthlyCapacity,
+            );
+            $recommendations = [];
+
+            if ($monthlyContributionGap > 0) {
+                $recommendations[] = [
+                    'title' => 'Review the monthly contribution gap',
+                    'detail' => 'Current recorded spending leaves '.CurrencyCalculator::formatMinorUnits($monthlyCapacity).' '.$homeCurrency.' before tuition saving, against a scheduled '.$requiredMonthly['converted_amount'].' '.$homeCurrency.' per month. The difference is '.CurrencyCalculator::formatMinorUnits($monthlyContributionGap).' '.$homeCurrency.' per month; review category limits or discuss a different target date or contribution in chat.',
+                    'href' => '#budgets',
+                ];
+            } else {
+                $recommendations[] = [
+                    'title' => 'Keep the scheduled contribution under review',
+                    'detail' => 'The current recorded-spending baseline leaves enough for the scheduled '.$requiredMonthly['converted_amount'].' '.$homeCurrency.' monthly contribution. This is an estimate based on this month’s entries repeating, not a guarantee.',
+                    'href' => '#activity',
+                ];
+            }
+
+            if ($fundingEntries->isNotEmpty()) {
+                $recommendations[] = [
+                    'title' => 'Review your saved funding deadlines',
+                    'detail' => 'Funding opportunities are user-entered and their potential amounts are not counted as available or confirmed money in this projection.',
+                    'href' => '#funding',
+                ];
+            }
+
+            $projection = [
+                'available' => true,
+                'missing' => [],
+                'plan_title' => $plan->title,
+                'currency' => $homeCurrency,
+                'months' => $forecastMonths,
+                'weeks' => $schedule['weeks_available'],
+                'as_of' => today()->toDateString(),
+                'required_monthly' => $requiredMonthly['converted_amount'],
+                'monthly_income' => $profile->monthly_income === null ? null : (string) $profile->monthly_income,
+                'monthly_spending' => $monthlySpending,
+                'monthly_capacity' => CurrencyCalculator::formatMinorUnits($monthlyCapacity),
+                'monthly_contribution_gap' => CurrencyCalculator::formatMinorUnits($monthlyContributionGap),
+                'first_shortfall_month' => $firstShortfallMonth,
+                'first_shortfall_type' => $firstShortfallType,
+                'projected_cash_flow' => $baseline['projected_cash_flow'],
+                'tuition_shortfall' => $baseline['tuition_shortfall'],
+                'scenarios' => $scenarioComparisons,
+                'recommendations' => $recommendations,
+                'formula' => 'Baseline projection reuses the scenario engine: monthly budget − current-month recorded expenses − scheduled tuition saving. The first month with negative cash flow or a contribution below the schedule is reported and labeled by type.',
+                'assumptions' => [
+                    'Current-month recorded home-currency expenses repeat as the monthly spending baseline; the month may be incomplete.',
+                    'The existing tuition schedule is treated as the monthly contribution, converted with the demonstration-rate calculator when needed.',
+                    'Expected monthly income is already included in the saved monthly budget and is not added a second time.',
+                    'Stress scenarios are independent hypotheticals; potential scholarship or funding amounts are not counted as confirmed funds.',
+                    'Only the earliest outstanding tuition plan is used; this is a planning scenario, not a prediction.',
+                ],
+                'conversion' => $requiredMonthly,
+            ];
+        }
+
+        return [
+            'home_currency' => $homeCurrency,
+            'as_of' => today()->toDateString(),
+            'budget' => $profile === null ? null : [
+                'currency' => $homeCurrency,
+                'monthly_budget' => (string) $profile->monthly_budget,
+                'monthly_income' => $profile->monthly_income === null ? null : (string) $profile->monthly_income,
+                'recorded_expenses' => CurrencyCalculator::formatMinorUnits($spentMinor),
+                'remaining' => CurrencyCalculator::formatMinorUnits(max(0, CurrencyCalculator::toMinorUnits((string) $profile->monthly_budget) - $spentMinor)),
+                'over_budget' => CurrencyCalculator::formatMinorUnits(max(0, $spentMinor - CurrencyCalculator::toMinorUnits((string) $profile->monthly_budget))),
+                'expense_count' => $homeCurrencyExpenseCount,
+                'formula' => 'Monthly budget − current-month recorded expenses in the same currency. Foreign-currency records are excluded from this indicator.',
+                'category_budgets' => $categoryBudgets->all(),
+            ],
+            'tuition' => $tuitionItems->all(),
+            'savings_goals' => $savingsGoals->all(),
+            'monthly_budgets' => $categoryBudgets->all(),
+            'funding_opportunities' => $fundingEntries->all(),
+            'information_gaps' => $informationGaps,
+            'currency_exposure' => $foreignTuition->all(),
+            'projection' => $projection,
+        ];
     }
 
     public function saveProfile(Request $request): RedirectResponse

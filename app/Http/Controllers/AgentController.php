@@ -97,11 +97,16 @@ class AgentController extends Controller
         try {
             $saved = $tools->confirm($request->user(), $conversation, (int) $data['pending_action_id']);
         } catch (\InvalidArgumentException|ValidationException $exception) {
-            return response()->json(['message' => 'The proposed change is invalid and was not saved.'], 422);
+            return response()->json([
+                'message' => 'The proposed change is no longer valid; nothing was saved.',
+                'refresh' => true,
+            ], 422);
         }
 
         return response()->json([
-            'message' => 'Confirmed and saved to your account.',
+            'message' => ($saved['deleted'] ?? false)
+                ? 'Confirmed and deleted from your account. No payment was made.'
+                : 'Confirmed and saved to your account.',
             'saved' => $saved,
         ]);
     }
@@ -122,5 +127,16 @@ class AgentController extends Controller
         }
 
         return response()->json(['message' => 'The proposed change was discarded. Nothing was saved.']);
+    }
+
+    public function destroy(Request $request, AgentConversation $conversation): JsonResponse
+    {
+        $ownedConversation = $request->user()->agentConversations()->whereKey($conversation->id)->firstOrFail();
+        $ownedConversation->delete();
+
+        return response()->json([
+            'message' => 'Conversation deleted.',
+            'conversation_id' => $conversation->id,
+        ]);
     }
 }

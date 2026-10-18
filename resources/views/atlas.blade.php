@@ -18,6 +18,7 @@
             <div class="workspace-label">YOUR WORKSPACE</div>
             <nav class="side-nav" aria-label="Main navigation">
                 <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span> Overview</a>
+                <a class="nav-item" href="#readiness"><span class="nav-icon">↗</span> Resilience snapshot</a>
                 <a class="nav-item" href="#assistant"><span class="nav-icon">✳</span> Atlas assistant <span class="nav-tag">AI</span></a>
                 <a class="nav-item" href="#tuition"><span class="nav-icon">▤</span> Tuition planner</a>
                 <a class="nav-item" href="#currency"><span class="nav-icon">↔</span> Currency &amp; transfers</a>
@@ -30,7 +31,7 @@
             </nav>
             <div class="sidebar-bottom">
                 <div class="sidebar-note"><span class="note-icon">i</span><span>Atlas helps you plan. It never moves money or guarantees an outcome.</span></div>
-                <div class="sidebar-user"><div class="avatar">{{ mb_substr(auth()->user()->name, 0, 1) }}</div><div class="user-copy"><b>{{ auth()->user()->name }}</b><span>{{ auth()->user()->email }}</span></div><form method="post" action="{{ route('logout') }}">@csrf<button class="icon-button" type="submit" aria-label="Sign out" title="Sign out">↗</button></form></div>
+                <div class="sidebar-user"><div class="avatar">{{ mb_substr(auth()->user()->name, 0, 1) }}</div><div class="user-copy"><b>{{ auth()->user()->name }}</b><span>{{ auth()->user()->email }}</span></div><form method="post" action="{{ route('logout') }}" data-confirm-logout>@csrf<button class="icon-button" type="submit" aria-label="Sign out" title="Sign out">↗</button></form></div>
             </div>
         </aside>
         <main class="main-content">
@@ -65,12 +66,177 @@
                         <a class="button button-quiet" href="#profile-settings">Update profile <span aria-hidden="true">↗</span></a>
                     </section>
                     <section class="metric-grid">
-                        <article class="metric-card metric-primary"><div class="metric-top"><span>AVAILABLE THIS MONTH</span><span class="metric-icon">↗</span></div><div class="metric-value">{{ $profile->home_currency }} {{ $availableFunds }}</div><div class="metric-foot">@if ($overBudget > 0) Over budget by {{ $profile->home_currency }} {{ \App\Services\CurrencyCalculator::formatMinorUnits($overBudget) }} @else {{ $profile->home_currency }} budget less same-currency recorded expenses @endif</div><div class="metric-rule"><i style="width: {{ $budgetUsagePercent }}%"></i></div><div class="metric-foot metric-bottom">Budget {{ $profile->home_currency }} {{ $profile->monthly_budget }} <span>{{ $profile->destination_country }}</span></div></article>
-                        <article class="metric-card"><div class="metric-top"><span>SPENT THIS MONTH</span><span class="metric-icon">⌁</span></div><div class="metric-value">{{ $profile->home_currency }} {{ $monthlySpending }}</div><div class="metric-foot">Recorded expenses in your home currency</div><div class="metric-mini"><span class="mini-dot green"></span> {{ $categoryBreakdown->count() }} spending {{ \Illuminate\Support\Str::plural('category', $categoryBreakdown->count()) }} tracked</div></article>
-                        <article class="metric-card"><div class="metric-top"><span>TUITION PLANS</span><span class="metric-icon">▤</span></div><div class="metric-value">{{ $tuitionPlans->count() }} <small>{{ \Illuminate\Support\Str::plural('plan', $tuitionPlans->count()) }}</small></div><div class="metric-foot">{{ $firstTuition?->due_date?->format('M j, Y') ?? 'Add a tuition deadline to begin' }}</div><a class="metric-link" href="#tuition">View tuition plan <span>→</span></a></article>
-                        <article class="metric-card"><div class="metric-top"><span>SAVINGS GOALS</span><span class="metric-icon">◎</span></div><div class="metric-value">{{ $goals->count() }} <small>{{ \Illuminate\Support\Str::plural('goal', $goals->count()) }}</small></div><div class="metric-foot">{{ $goals->first()['goal']->title ?? 'Small steps, clearly measured' }}</div><a class="metric-link" href="#goals">View savings goals <span>→</span></a></article>
+                        <article class="metric-card metric-primary">
+                            <div>
+                                <div class="metric-top"><span>AVAILABLE THIS MONTH</span><span class="metric-icon">↗</span></div>
+                                <div class="metric-value">{{ $profile->home_currency }} {{ $availableFunds }}</div>
+                                <div class="metric-foot">@if ($overBudget > 0) Over budget by {{ $profile->home_currency }} {{ \App\Services\CurrencyCalculator::formatMinorUnits($overBudget) }} @else {{ $profile->home_currency }} budget less same-currency recorded expenses @endif</div>
+                            </div>
+                            <div>
+                                <div class="metric-rule"><i style="width: {{ $budgetUsagePercent }}%"></i></div>
+                                <div class="metric-foot metric-bottom"><span>Monthly budget {{ $profile->home_currency }} {{ $profile->monthly_budget }}</span> <span>Study destination: {{ $profile->destination_country }} · Home currency: {{ $profile->home_currency }}</span></div>
+                            </div>
+                        </article>
+                        <article class="metric-card">
+                            <div>
+                                <div class="metric-top"><span>SPENT THIS MONTH</span><span class="metric-icon">⌁</span></div>
+                                <div class="metric-value">{{ $profile->home_currency }} {{ $monthlySpending }}</div>
+                                <div class="metric-foot">Recorded expenses in your home currency</div>
+                            </div>
+                            <div class="metric-mini"><span class="mini-dot green"></span> {{ $categoryBreakdown->count() }} spending {{ \Illuminate\Support\Str::plural('category', $categoryBreakdown->count()) }} tracked</div>
+                        </article>
+                        <article class="metric-card">
+                            <div>
+                                <div class="metric-top"><span>TUITION PLANS</span><span class="metric-icon">▤</span></div>
+                                <div class="metric-value">{{ $tuitionPlans->count() }} <small>{{ \Illuminate\Support\Str::plural('plan', $tuitionPlans->count()) }}</small></div>
+                                <div class="metric-foot">{{ $firstTuition?->due_date?->format('M j, Y') ?? 'Add a tuition deadline to begin' }}</div>
+                            </div>
+                            <a class="metric-link" href="#tuition">View tuition plan <span>→</span></a>
+                        </article>
+                        <article class="metric-card">
+                            <div>
+                                <div class="metric-top"><span>SAVINGS GOALS</span><span class="metric-icon">◎</span></div>
+                                <div class="metric-value">{{ $goals->count() }} <small>{{ \Illuminate\Support\Str::plural('goal', $goals->count()) }}</small></div>
+                                <div class="metric-foot">{{ $goals->first()['goal']->title ?? 'Small steps, clearly measured' }}</div>
+                            </div>
+                            <a class="metric-link" href="#goals">View savings goals <span>→</span></a>
+                        </article>
                     </section>
                 @endif
+
+                <section class="panel resilience-panel" id="readiness">
+                    <div class="panel-heading"><div><div class="eyebrow">ATLAS STUDENT FINANCIAL FLIGHT PLAN · EVIDENCE FROM YOUR RECORDS</div><h2>Student Financial Flight Plan</h2><p>Cross-border financial resilience, planned from your saved goals, obligations and current-month activity. As of {{ $readinessSnapshot['as_of'] }}. Potential awards are not counted as available money.</p></div><span class="tool-symbol">↗</span></div>
+                    <div class="resilience-grid">
+                        <article class="resilience-card">
+                            <h3>Tuition gaps &amp; deadlines</h3>
+                            @if ($readinessSnapshot['tuition'] === [])
+                                <p class="resilience-empty">No tuition plans are recorded. Add a plan to calculate the outstanding amount and savings pace.</p>
+                            @else
+                                @foreach ($readinessSnapshot['tuition'] as $item)
+                                    <div class="resilience-record">
+                                        <b>{{ $item['title'] }}</b>
+                                        <span>Outstanding: {{ $item['currency'] }} — {{ $currencyNames[$item['currency']] }} {{ $item['remaining'] }}</span>
+                                        <span>Deadline: {{ $item['due_date'] }} · {{ $item['due_in_days'] }} days · @if ($item['status'] === 'funded') recorded savings cover the total @elseif ($item['status'] === 'overdue') passed with a remaining balance @elseif ($item['status'] === 'due_today') today with a remaining balance @else future date; affordability is assessed separately @endif</span>
+                                        <span>Saved so far: {{ $item['currency'] }} {{ $item['saved'] }} of {{ $item['currency'] }} {{ $item['total'] }}.</span>
+                                        <span>Required pace: {{ $item['currency'] }} {{ $item['required_monthly'] }} across {{ $item['months_available'] }} monthly periods, or {{ $item['currency'] }} {{ $item['required_weekly'] }} across {{ $item['weeks_available'] }} weekly periods.</span>
+                                        <details class="resilience-evidence"><summary>Evidence &amp; calculation</summary><p>{{ $item['formula'] }}</p><p>Recorded total {{ $item['currency'] }} {{ $item['total'] }} − recorded savings {{ $item['currency'] }} {{ $item['saved'] }}.</p></details>
+                                    </div>
+                                @endforeach
+                            @endif
+                        </article>
+                        <article class="resilience-card">
+                            <h3>Monthly budget &amp; currency exposure</h3>
+                            @if ($readinessSnapshot['budget'] === null)
+                                <p class="resilience-empty">No saved profile budget is available. Set a home currency and monthly budget to compare records.</p>
+                            @else
+                                <div class="resilience-record">
+                                    <b>{{ $readinessSnapshot['budget']['currency'] }} — {{ $currencyNames[$readinessSnapshot['budget']['currency']] }}</b>
+                                    <span>Monthly budget: {{ $readinessSnapshot['budget']['currency'] }} {{ $readinessSnapshot['budget']['monthly_budget'] }}</span>
+                                    @if ($readinessSnapshot['budget']['monthly_income'] === null)
+                                        <span>Expected monthly income is not recorded; no income-delay stress scenario is calculated.</span>
+                                    @else
+                                        <span>Saved expected monthly income: {{ $readinessSnapshot['budget']['currency'] }} {{ $readinessSnapshot['budget']['monthly_income'] }} (already included in the monthly budget assumption).</span>
+                                    @endif
+                                    <span>Recorded expenses this month: {{ $readinessSnapshot['budget']['currency'] }} {{ $readinessSnapshot['budget']['recorded_expenses'] }}</span>
+                                    <span>@if ($readinessSnapshot['budget']['over_budget'] !== '0.00') Over budget by {{ $readinessSnapshot['budget']['currency'] }} {{ $readinessSnapshot['budget']['over_budget'] }} @else Remaining within budget: {{ $readinessSnapshot['budget']['currency'] }} {{ $readinessSnapshot['budget']['remaining'] }} @endif</span>
+                                    <details class="resilience-evidence"><summary>Evidence &amp; calculation</summary><p>{{ $readinessSnapshot['budget']['formula'] }}</p><p>{{ $readinessSnapshot['budget']['expense_count'] }} same-currency expense {{ \Illuminate\Support\Str::plural('record', $readinessSnapshot['budget']['expense_count']) }} counted. Foreign-currency activity is kept separate.</p></details>
+                                </div>
+                            @endif
+                            <div class="resilience-record" id="budgets">
+                                <b>Active monthly category limits</b>
+                                @if ($readinessSnapshot['monthly_budgets'] === [])
+                                    <span>No active category budgets are available. Category limits are subsets of spending and are not subtracted a second time.</span>
+                                @else
+                                    @foreach ($readinessSnapshot['monthly_budgets'] as $categoryBudget)
+                                        <span>{{ $categoryBudget['category'] }}: {{ $categoryBudget['currency'] }} {{ $categoryBudget['spent'] }} recorded against {{ $categoryBudget['currency'] }} {{ $categoryBudget['limit'] }} ({{ $categoryBudget['period_start'] }} to {{ $categoryBudget['period_end'] }}).</span>
+                                        @if ($categoryBudget['over_budget'] !== '0.00')<small>Recorded amount is {{ $categoryBudget['currency'] }} {{ $categoryBudget['over_budget'] }} over this category limit.</small>@else<span>Remaining category limit: {{ $categoryBudget['currency'] }} {{ $categoryBudget['remaining'] }}.</span>@endif
+                                    @endforeach
+                                @endif
+                            </div>
+                            <div class="resilience-record">
+                                <b>Foreign-currency tuition</b>
+                                @if ($readinessSnapshot['home_currency'] === null)
+                                    <span>Set a home currency to identify and convert foreign-currency tuition obligations.</span>
+                                @elseif ($readinessSnapshot['currency_exposure'] === [])
+                                    <span>No outstanding tuition plan in a currency different from your home currency.</span>
+                                @else
+                                    @foreach ($readinessSnapshot['currency_exposure'] as $exposure)
+                                        <span>{{ $exposure['title'] }}: {{ $exposure['currency'] }} {{ $exposure['remaining'] }} outstanding; estimated {{ $readinessSnapshot['home_currency'] }} {{ $exposure['home_equivalent'] }} equivalent.</span>
+                                        <small>Rate {{ $exposure['conversion']['rate'] }} {{ $exposure['conversion']['to_currency'] }} per {{ $exposure['conversion']['from_currency'] }} · {{ $exposure['conversion']['source'] }} · read {{ $exposure['conversion']['retrieved_at'] }}. Not a live market rate.</small>
+                                    @endforeach
+                                @endif
+                            </div>
+                        </article>
+                        <article class="resilience-card">
+                            <h3>Savings goals &amp; funding milestones</h3>
+                            @if ($readinessSnapshot['savings_goals'] === [])
+                                <p class="resilience-empty">No savings goals are recorded.</p>
+                            @else
+                                @foreach ($readinessSnapshot['savings_goals'] as $goal)
+                                    <div class="resilience-record">
+                                        <b>{{ $goal['title'] }}</b>
+                                        <span>Saved {{ $goal['currency'] }} {{ $goal['saved'] }} of {{ $goal['currency'] }} {{ $goal['target'] }}; {{ $goal['currency'] }} {{ $goal['remaining'] }} remaining.</span>
+                                        <span>Progress: {{ $goal['progress'] }}% · Target date: {{ $goal['target_date'] ?? 'not set' }}.</span>
+                                    </div>
+                                @endforeach
+                            @endif
+                            @if ($readinessSnapshot['funding_opportunities'] === [])
+                                <div class="resilience-record"><b>Funding deadlines</b><span>No user-entered funding opportunities are recorded.</span></div>
+                            @else
+                                <div class="resilience-record">
+                                    <b>User-entered funding deadlines</b>
+                                    @foreach ($readinessSnapshot['funding_opportunities'] as $opportunity)
+                                        <span>{{ $opportunity['title'] }} · {{ $opportunity['provider'] }} · deadline {{ $opportunity['deadline'] ?? 'not provided' }} · status {{ str_replace('_', ' ', $opportunity['status']) }}.</span>
+                                        <small>Potential value: {{ $opportunity['potential_amount'] === null ? 'not provided' : $opportunity['currency'].' '.$opportunity['potential_amount'] }}. Not counted as confirmed funding.</small>
+                                    @endforeach
+                                    <a href="#funding">Review funding entries and their source details</a>
+                                </div>
+                            @endif
+                            <p class="resilience-note">Funding entries are user-entered and unverified; even an entry marked awarded is not included in this projection.</p>
+                        </article>
+                        <article class="resilience-card resilience-projection">
+                            <h3>Baseline and stress-test outlook</h3>
+                            @if (!$readinessSnapshot['projection']['available'])
+                                <p class="resilience-empty">Insufficient data for a baseline forecast.</p>
+                                <ul>@foreach ($readinessSnapshot['projection']['missing'] as $missing)<li>{{ $missing }}</li>@endforeach</ul>
+                            @else
+                                @if ($readinessSnapshot['projection']['first_shortfall_month'] === null)
+                                    <b>No monthly cash-flow or scheduled tuition-contribution shortfall is projected in the next {{ $readinessSnapshot['projection']['months'] }} months.</b>
+                                @else
+                                    <b>First projected financial shortfall: {{ $readinessSnapshot['projection']['first_shortfall_type'] }} in month {{ $readinessSnapshot['projection']['first_shortfall_month'] }}.</b>
+                                @endif
+                                <p>Baseline ending net cash flow: {{ $readinessSnapshot['projection']['currency'] }} {{ $readinessSnapshot['projection']['projected_cash_flow'] }} · tuition shortfall at horizon: {{ $readinessSnapshot['projection']['currency'] }} {{ $readinessSnapshot['projection']['tuition_shortfall'] }}.</p>
+                                <p>As of {{ $readinessSnapshot['projection']['as_of'] }}: {{ $readinessSnapshot['projection']['monthly_capacity'] }} {{ $readinessSnapshot['projection']['currency'] }} remains per month after recorded expenses, against a scheduled contribution of {{ $readinessSnapshot['projection']['required_monthly'] }}. Contribution gap: {{ $readinessSnapshot['projection']['currency'] }} {{ $readinessSnapshot['projection']['monthly_contribution_gap'] }} per month.</p>
+                                <div class="flight-plan-scenarios" aria-label="Baseline and hypothetical scenario comparisons">
+                                    @foreach ($readinessSnapshot['projection']['scenarios'] as $scenario)
+                                        <article class="flight-plan-scenario">
+                                            <h4>{{ $scenario['name'] }}</h4>
+                                            <p>{{ $scenario['change'] }}</p>
+                                            <span>Tuition shortfall: {{ $readinessSnapshot['projection']['currency'] }} {{ $scenario['tuition_shortfall'] }} · change {{ $scenario['shortfall_change'] }}.</span>
+                                            <span>Ending cash flow: {{ $readinessSnapshot['projection']['currency'] }} {{ $scenario['projected_cash_flow'] }} · change {{ $scenario['cash_flow_change'] }}.</span>
+                                            <span>First shortfall: {{ $scenario['first_shortfall_month'] === null ? 'none projected in this horizon' : 'month '.$scenario['first_shortfall_month'] }}.</span>
+                                        </article>
+                                    @endforeach
+                                </div>
+                                @if ($readinessSnapshot['projection']['recommendations'] !== [])
+                                    <div class="flight-plan-recommendations">
+                                        <h4>Suggested next steps</h4>
+                                        <ol>
+                                            @foreach ($readinessSnapshot['projection']['recommendations'] as $recommendation)
+                                                <li><b>{{ $recommendation['title'] }}</b><span>{{ $recommendation['detail'] }}</span><a href="{{ $recommendation['href'] }}">Review this area</a></li>
+                                            @endforeach
+                                        </ol>
+                                    </div>
+                                @endif
+                                <details class="resilience-evidence"><summary>Evidence, calculation &amp; assumptions</summary><p>{{ $readinessSnapshot['projection']['formula'] }}</p><p>Plan: {{ $readinessSnapshot['projection']['plan_title'] }} · horizon: {{ $readinessSnapshot['projection']['months'] }} monthly periods and {{ $readinessSnapshot['projection']['weeks'] }} weekly periods · scheduled contribution {{ $readinessSnapshot['projection']['currency'] }} {{ $readinessSnapshot['projection']['required_monthly'] }} per month.</p><ul>@foreach ($readinessSnapshot['projection']['assumptions'] as $assumption)<li>{{ $assumption }}</li>@endforeach</ul><p>Tuition savings conversion: {{ $readinessSnapshot['projection']['conversion']['from_currency'] }} to {{ $readinessSnapshot['projection']['conversion']['to_currency'] }} at {{ $readinessSnapshot['projection']['conversion']['rate'] }} · {{ $readinessSnapshot['projection']['conversion']['source'] }} · read {{ $readinessSnapshot['projection']['conversion']['retrieved_at'] }}.</p></details>
+                            @endif
+                            @if ($readinessSnapshot['information_gaps'] !== [])
+                                <details class="resilience-evidence"><summary>Information gaps and untested assumptions</summary><ul>@foreach ($readinessSnapshot['information_gaps'] as $gap)<li>{{ $gap }}</li>@endforeach</ul></details>
+                            @endif
+                            <p class="resilience-note">Estimates repeat saved inputs; they are not predictions. Ask Atlas to discuss this Flight Plan or prepare a supported draft; no change is saved without your exact approval. <a href="#assistant">Discuss this flight plan with Atlas</a></p>
+                        </article>
+                    </div>
+                </section>
 
                 <section class="panel help-guide" id="help">
                     <div class="panel-heading"><div><div class="eyebrow">HELP &amp; FAQ · HOW TO USE ATLAS</div><h2>Start with a clear picture</h2><p>Atlas is a private planning workspace built from information you enter. It does not connect to banks, move money, or guarantee outcomes.</p></div><span class="tool-symbol">?</span></div>
@@ -84,13 +250,13 @@
                         </ol>
                     </div>
                     <div class="help-topics">
-                        <details><summary>Register, sign in, navigate, and manage your profile</summary><p>Create an account from the landing page with your name, email, and a password of at least 12 characters; sign in with the same email and password, and use Sign out to end your session. The left navigation jumps to each workspace section. Under Profile &amp; settings, enter your study destination, home currency, monthly budget and optional monthly income. Example: <b>CAD — Canadian dollar</b>, <b>1800.00 CAD per month</b>. Your account is private; email verification and password recovery are not currently available.</p></details>
+                        <details><summary>Register, sign in, navigate, and manage your profile</summary><p>Create an account from the landing page with your name, email, and a password of at least 12 characters that includes uppercase and lowercase letters, a number, and a special character. Verify your email with the code sent during registration. Sign in with the same email and password, and use Sign out to end your session. The left navigation jumps to each workspace section. Under Profile &amp; settings, enter your study destination, home currency, monthly budget and optional monthly income. Example: <b>CAD — Canadian dollar</b>, <b>1800.00 CAD per month</b>.</p></details>
                         <details><summary>Tuition timeline, savings goals, and budgets</summary><p>For tuition, enter a plan name, full amount, saved amount, currency, due date and installment count (1–24). Example: <b>12000.00 USD</b> annual tuition and <b>2000.00 USD</b> already saved, due in 10 months. The schedule estimates monthly/weekly savings and equal installments; it is not an institution invoice. A goal has a target, current savings, currency and optional date. Category budgets are monthly limits with a selected currency. Progress entries update your planning records only; they cannot exceed the target and do not move money.</p></details>
                         <details><summary>Currency converter and transfer estimates</summary><p>Select an amount, source and destination currency explicitly; for example, <b>500.00 USD (United States dollar) to EUR (Euro)</b>. The converter uses Atlas’s fixed demonstration-rate table, displays the conversion rate, table source and calculation time. The time is when Atlas read its local table, not when a market rate was published. Transfer estimates deduct illustrative fees in the source currency before converting the recipient amount. The fee profiles and delivery windows are simulated—not provider offers, live rates or guarantees—and neither tool sends money.</p></details>
                         <details><summary>Scenario lab and forecasts</summary><p>Enter monthly budget, spending, rent, income and expected scholarship in your profile’s home currency, or choose the forecast budget currency if you have no profile. Enter tuition target, saved amount and fee in the selected tuition source currency; then choose a destination currency, due date and installment count. Example: <b>1800.00 CAD per month</b> budget, <b>900.00 CAD per month</b> spending and <b>12000.00 USD</b> tuition. Favorable, baseline and adverse results are deterministic estimates; rent changes, income delays, FX stress and unconfirmed scholarship timing are assumptions, not predictions or verified funds.</p></details>
                         <details><summary>Activity, funding planner, and action log</summary><p>Activity records need a type, category, description, date, amount and selected currency. Example: <b>800.00 CAD monthly rent</b>. Filter by income or expense; manual and simulated records are labeled, and amounts in different currencies are kept separate. Funding entries are opportunities you found yourself: provider, potential value and currency, deadline, status and source link. Atlas does not search or verify eligibility or awards. Saved plans are user-approved notes. The action log stores tool names and outcomes, not action arguments.</p></details>
                         <details><summary>AI assistant, confirmation, loading, and errors</summary><p>Ask a specific question with its currency, such as “Convert 500 USD to EUR and explain the rate source.” The assistant can read only your account’s records. To change a saved goal or tuition plan, it first prepares a draft showing the affected record, current and proposed values, currency and expected change. Only the explicit Confirm action authorizes that exact change in your Atlas account; Not now discards it. Confirmation never authorizes a payment, bank transfer, remittance, or future action. Drafts expire after 15 minutes and must be confirmed separately. While a request is running, wait for its result; validation messages identify rejected input, while provider/network errors mean the assistant is unavailable and do not imply a change was saved.</p></details>
-                        <details><summary>Privacy, security, and common questions</summary><p>The configured AI provider ({{ $aiProviderName }}) receives the current chat message and tool results when AI is configured. Recent message history is sent only when you opt in to memory. Never paste API keys, passwords, card numbers, account credentials or identity documents into chat. Atlas is a planning prototype, not financial, tax, immigration or legal advice; verify important decisions with a qualified professional. Rates, fee examples, forecasts, and manually entered funding information are not guaranteed or verified. Atlas makes no real payments. Email verification and account password recovery are not implemented; use a unique password and keep your login details safe.</p></details>
+                        <details><summary>Privacy, security, and common questions</summary><p>The configured AI provider ({{ $aiProviderName }}) receives the current chat message and tool results when AI is configured. Recent message history is sent only when you opt in to memory. Never paste API keys, passwords, card numbers, account credentials or identity documents into chat. Atlas is a planning prototype, not financial, tax, immigration or legal advice; verify important decisions with a qualified professional. Rates, fee examples, forecasts, and manually entered funding information are not guaranteed or verified. Atlas makes no real payments. Registration email verification is available, but password recovery/change and login MFA (including authenticator apps) are not implemented. Google sign-in is not login MFA; use a unique password and keep your login details safe.</p></details>
                     </div>
                 </section>
 
@@ -170,7 +336,7 @@
                                         <div><b>{{ \Illuminate\Support\Str::headline($action->tool_name) }}</b><small>Draft for conversation #{{ $action->conversation_id }} · expires {{ $action->expires_at->diffForHumans() }}</small></div>
                                         <div class="pending-action-summary" data-pending-action="{{ json_encode(['id' => $action->id, 'name' => $action->tool_name, 'arguments' => $action->arguments, 'before_state' => $action->before_state], JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP) }}"></div>
                                         <div class="approval-actions">
-                                            <button class="button button-primary" type="button" aria-label="Confirm and save {{ \Illuminate\Support\Str::headline($action->tool_name) }}" data-approve-pending="{{ $action->id }}" data-conversation-id="{{ $action->conversation_id }}">Confirm and save</button>
+                                            <button class="button button-primary" type="button" aria-label="{{ str_starts_with($action->tool_name, 'delete_') ? 'Confirm deletion of this record' : 'Confirm and save '.\Illuminate\Support\Str::headline($action->tool_name) }}" data-approve-pending="{{ $action->id }}" data-conversation-id="{{ $action->conversation_id }}">{{ str_starts_with($action->tool_name, 'delete_') ? 'Confirm deletion' : 'Confirm and save' }}</button>
                                             <button class="button button-quiet" type="button" aria-label="Discard {{ \Illuminate\Support\Str::headline($action->tool_name) }}" data-reject-pending="{{ $action->id }}" data-conversation-id="{{ $action->conversation_id }}">Not now</button>
                                         </div>
                                     </article>
@@ -179,8 +345,21 @@
                         @endif
                     </section>
                     <div class="assistant-layout">
-                        <aside class="conversation-rail"><div class="rail-heading"><span>RECENT CONVERSATIONS</span><button type="button" data-new-chat aria-label="Start a new conversation">+</button></div>
-                            @forelse ($conversations as $conversation)<button class="conversation-item {{ $selectedConversation?->id === $conversation->id ? 'selected' : '' }}" type="button" data-load-conversation="{{ $conversation->id }}"><b>{{ \Illuminate\Support\Str::limit($conversation->title, 34) }}</b><small>{{ $conversation->updated_at->diffForHumans() }}</small></button>@empty<p class="conversation-empty">Your saved conversations will appear here.</p>@endforelse
+                        <aside class="conversation-rail">
+                            <div class="rail-heading"><span>RECENT CONVERSATIONS</span><button type="button" data-new-chat aria-label="Start a new conversation">+</button></div>
+                            <div class="conversation-list">
+                                @forelse ($conversations as $conversation)
+                                    <div class="conversation-row {{ $selectedConversation?->id === $conversation->id ? 'selected' : '' }}" data-conversation-row="{{ $conversation->id }}">
+                                        <button class="conversation-item {{ $selectedConversation?->id === $conversation->id ? 'selected' : '' }}" type="button" data-load-conversation="{{ $conversation->id }}">
+                                            <b>{{ \Illuminate\Support\Str::limit($conversation->title, 28) }}</b>
+                                            <small>{{ $conversation->updated_at->diffForHumans() }}</small>
+                                        </button>
+                                        <button class="conversation-delete-btn" type="button" data-delete-conversation="{{ $conversation->id }}" title="Delete chat" aria-label="Delete chat">×</button>
+                                    </div>
+                                @empty
+                                    <p class="conversation-empty">Your saved conversations will appear here.</p>
+                                @endforelse
+                            </div>
                         </aside>
                         <div class="chat-workspace">
                             <div class="chat-messages" id="chat-messages" aria-live="polite" data-conversation-id="{{ $selectedConversation?->id ?? '' }}">
@@ -227,21 +406,21 @@
                     <div class="panel-heading"><div><div class="eyebrow">CHANGE THE ASSUMPTIONS</div><h2>Scenario lab</h2><p>See how a different month, contribution or exchange-rate assumption changes the picture.</p></div><span class="simulator-stamp">HYPOTHETICAL ONLY</span></div>
                     <form class="scenario-form" id="scenario-form">
                         <div class="scenario-fields">
-                            <label>Monthly budget (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_budget" type="number" min="0" max="99999999.99" step="0.01" value="{{ $profile?->monthly_budget ?? '1800.00' }}" required></label>
+                            <label>Monthly budget (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_budget" type="number" min="0" max="99999999.99" step="0.01" value="{{ $profile?->monthly_budget ?? '' }}" placeholder="Enter monthly budget" required></label>
                             <label>Monthly spending (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_spending" type="number" min="0" max="99999999.99" step="0.01" value="{{ $monthlySpending }}" required></label>
-                            <label>Tuition contribution (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="tuition_contribution" type="number" min="0" max="99999999.99" step="0.01" value="200.00" required></label>
-                            <label>Tuition target (<span class="currency-name" data-currency-name-for="from_currency" data-empty-label="Choose tuition currency">Choose tuition currency</span>, total for this plan)<input name="tuition_amount" type="number" min="0.01" max="99999999.99" step="0.01" value="{{ $firstTuition?->amount ?? '12000.00' }}" required></label>
-                            <label>Already saved (<span class="currency-name" data-currency-name-for="from_currency" data-empty-label="Choose tuition currency">Choose tuition currency</span>)<input name="saved_amount" type="number" min="0" max="99999999.99" step="0.01" value="{{ $firstTuition?->saved_amount ?? '0.00' }}" required></label>
-                            <label>Tuition due date<input name="due_date" type="date" value="{{ $firstTuition?->due_date?->toDateString() ?? today()->addMonths(10)->toDateString() }}" required></label>
-                            <label>Installment count<input name="installments" type="number" min="1" max="24" value="{{ $firstTuition?->installments ?? 4 }}" required></label>
-                            <label>Transfer fee assumption (<span class="currency-name" data-currency-name-for="from_currency" data-empty-label="Choose tuition currency">Choose tuition currency</span>)<input name="transfer_fee" type="number" min="0" max="99999999.99" step="0.01" value="5.00" required></label>
+                            <label>Tuition contribution (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="tuition_contribution" type="number" min="0" max="99999999.99" step="0.01" value="" placeholder="Enter monthly contribution" required></label>
+                            <label>Tuition target (<span class="currency-name" data-currency-name-for="from_currency" data-empty-label="Choose tuition currency">Choose tuition currency</span>, total for this plan)<input name="tuition_amount" type="number" min="0.01" max="99999999.99" step="0.01" value="{{ $firstTuition?->amount ?? '' }}" placeholder="Enter total tuition" required></label>
+                            <label>Already saved (<span class="currency-name" data-currency-name-for="from_currency" data-empty-label="Choose tuition currency">Choose tuition currency</span>)<input name="saved_amount" type="number" min="0" max="99999999.99" step="0.01" value="{{ $firstTuition?->saved_amount ?? '' }}" placeholder="Enter 0.00 if none" required></label>
+                            <label>Tuition due date<input name="due_date" type="date" value="{{ $firstTuition?->due_date?->toDateString() ?? '' }}" required></label>
+                            <label>Installment count<input name="installments" type="number" min="1" max="24" value="{{ $firstTuition?->installments ?? '' }}" placeholder="Enter count" required></label>
+                            <label>Transfer fee assumption (<span class="currency-name" data-currency-name-for="from_currency" data-empty-label="Choose tuition currency">Choose tuition currency</span>)<input name="transfer_fee" type="number" min="0" max="99999999.99" step="0.01" value="" placeholder="Enter fee assumption" required></label>
                             <label>Recipient rate change <span class="inline-value" id="rate-value">0%</span><input name="exchange_rate_change" type="range" min="-50" max="50" value="0" data-rate-slider></label>
                             <label>Tuition source currency<select name="from_currency" required>@if (!$profile)<option value="" selected disabled>Choose tuition currency</option>@endif @foreach ($currencies as $currency)<option value="{{ $currency }}" @selected($firstTuition?->currency === $currency || (!$firstTuition && $profile?->home_currency === $currency))>{{ $currency }} — {{ $currencyNames[$currency] }}</option>@endforeach</select></label>
                             <label>Forecast budget currency<select name="budget_currency" required>@if (!$profile)<option value="" selected disabled>Choose budget currency</option>@endif @foreach ($currencies as $currency)<option value="{{ $currency }}" @selected($profile?->home_currency === $currency)>{{ $currency }} — {{ $currencyNames[$currency] }}</option>@endforeach</select></label>
                             <label>Recipient currency<select name="to_currency" required><option value="" selected disabled>Choose recipient currency</option>@foreach ($currencies as $currency)<option value="{{ $currency }}">{{ $currency }} — {{ $currencyNames[$currency] }}</option>@endforeach</select></label>
-                            <label>Monthly rent included in spending (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_rent" type="number" min="0" max="99999999.99" step="0.01" value="0.00" required></label>
+                            <label>Monthly rent included in spending (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_rent" type="number" min="0" max="99999999.99" step="0.01" value="" placeholder="Enter amount included in spending" required></label>
                             <label>Rent change at forecast start (%)<input name="rent_change_percent" type="number" min="-50" max="100" step="1" value="10" required></label>
-                            <label>Monthly income included in budget (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_income" type="number" min="0" max="99999999.99" step="0.01" value="{{ $profile?->monthly_income ?? '0.00' }}" required></label>
+                            <label>Monthly income included in budget (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, per month)<input name="monthly_income" type="number" min="0" max="99999999.99" step="0.01" value="{{ $profile?->monthly_income ?? '' }}" placeholder="Enter amount already included in budget" required></label>
                             <label>Income delayed by (months)<input name="income_delay_months" type="number" min="0" max="12" step="1" value="0" required></label>
                             <label>Expected scholarship (<span class="currency-name" @unless($profile) data-currency-name-for="budget_currency" data-empty-label="Choose forecast budget currency" @endunless>{{ $profile ? $profile->home_currency.' — '.$currencyNames[$profile->home_currency] : 'Choose forecast budget currency' }}</span>, total)<input name="scholarship_amount" type="number" min="0" max="99999999.99" step="0.01" value="0.00" required></label>
                             <label>Scholarship arrives in month<input name="scholarship_month" type="number" min="0" max="24" step="1" value="0" required><small>0 means not received within the forecast.</small></label>
@@ -276,12 +455,12 @@
                     @if ($fundingOpportunities->isEmpty())
                         <div class="empty-state compact"><b>No funding opportunities recorded.</b><p>Add a real opportunity you have found and keep its official source handy. We do not generate or recommend unverified awards.</p></div>
                     @else
-                        <div class="funding-list">
+                            <div class="funding-list">
                             @foreach ($fundingOpportunities as $opportunity)
                                 <article class="funding-item">
                                     <div class="funding-item-heading"><div><b>{{ $opportunity->title }}</b><small>{{ $opportunity->provider }} · User-entered; not verified</small></div><span class="status-pill">{{ str_replace('_', ' ', $opportunity->status) }}</span></div>
                                     <div class="funding-item-details">
-                                        <span>Potential amount: {{ $opportunity->potential_amount === null ? 'Not provided' : $opportunity->currency.' '.$opportunity->potential_amount }}</span>
+                                        <span>Potential total: {{ $opportunity->potential_amount === null ? 'Not provided' : $opportunity->currency.' — '.$currencyNames[$opportunity->currency].' '.$opportunity->potential_amount }}</span>
                                         <span>Deadline: {{ $opportunity->deadline?->format('M j, Y') ?? 'Not provided' }}</span>
                                         @if ($opportunity->source_url)<a href="{{ $opportunity->source_url }}" target="_blank" rel="noopener noreferrer">Open source ↗</a>@endif
                                     </div>
