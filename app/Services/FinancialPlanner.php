@@ -7,7 +7,7 @@ use Carbon\CarbonImmutable;
 class FinancialPlanner
 {
     /**
-     * @return array{remaining: string, due_in_days: int, required_weekly: string, required_monthly: string, shortfall: string, status: string}
+     * @return array{remaining: string, due_in_days: int, weeks_available: int, months_available: int, required_weekly: string, required_monthly: string, shortfall: string, status: string}
      */
     public function tuitionSchedule(string $amount, string $savedAmount, string $dueDate): array
     {
@@ -23,6 +23,8 @@ class FinancialPlanner
         return [
             'remaining' => CurrencyCalculator::formatMinorUnits($remainingMinor),
             'due_in_days' => $dueInDays,
+            'weeks_available' => $weeks,
+            'months_available' => $months,
             'required_weekly' => CurrencyCalculator::formatMinorUnits(self::ceilDivide($remainingMinor, $weeks)),
             'required_monthly' => CurrencyCalculator::formatMinorUnits(self::ceilDivide($remainingMinor, $months)),
             'shortfall' => $dueInDays <= 0 ? CurrencyCalculator::formatMinorUnits($remainingMinor) : '0.00',
@@ -55,7 +57,7 @@ class FinancialPlanner
     }
 
     /**
-     * @return list<array{name: string, rate_change_percent: int, projected_tuition_fund: string, tuition_target: string, tuition_shortfall: string, total_contributions: string, scholarship_received: bool, projected_cash_flow: string}>
+     * @return list<array{name: string, rate_change_percent: int, projected_tuition_fund: string, tuition_target: string, tuition_shortfall: string, total_contributions: string, scholarship_received: bool, projected_cash_flow: string, first_cash_flow_shortfall_month: int|null, first_tuition_contribution_gap_month: int|null}>
      */
     public function forecastScenarios(
         string $monthlyBudget,
@@ -110,15 +112,27 @@ class FinancialPlanner
             $fundMinor = $scenarioSavedMinor;
             $contributionsMinor = 0;
             $cashFlowMinor = 0;
+            $firstCashFlowShortfallMonth = null;
+            $firstTuitionContributionGapMonth = null;
             $scholarshipReceived = $scholarshipMinor > 0 && $scholarshipMonth >= 1 && $scholarshipMonth <= $forecastMonths;
 
             for ($month = 1; $month <= $forecastMonths; $month++) {
                 $incomeLossMinor = $month <= $incomeDelayMonths ? $incomeMinor : 0;
                 $availableMinor = $budgetMinor - $spendingMinor - $rentChangeMinor - $incomeLossMinor;
                 $monthContributionMinor = min($contributionMinor, max(0, $availableMinor));
+
+                if ($contributionMinor > 0 && $monthContributionMinor < $contributionMinor && $firstTuitionContributionGapMonth === null) {
+                    $firstTuitionContributionGapMonth = $month;
+                }
+
                 $contributionsMinor += $monthContributionMinor;
                 $fundMinor += $monthContributionMinor;
-                $cashFlowMinor += $availableMinor - $monthContributionMinor;
+                $monthlyCashFlowMinor = $availableMinor - $monthContributionMinor;
+                $cashFlowMinor += $monthlyCashFlowMinor;
+
+                if ($monthlyCashFlowMinor < 0 && $firstCashFlowShortfallMonth === null) {
+                    $firstCashFlowShortfallMonth = $month;
+                }
             }
 
             if ($scholarshipReceived) {
@@ -134,6 +148,8 @@ class FinancialPlanner
                 'total_contributions' => CurrencyCalculator::formatMinorUnits($contributionsMinor),
                 'scholarship_received' => $scholarshipReceived,
                 'projected_cash_flow' => self::formatSignedMinorUnits($cashFlowMinor),
+                'first_cash_flow_shortfall_month' => $firstCashFlowShortfallMonth,
+                'first_tuition_contribution_gap_month' => $firstTuitionContributionGapMonth,
             ];
         }
 

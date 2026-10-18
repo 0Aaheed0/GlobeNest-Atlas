@@ -6,7 +6,12 @@ use App\Models\StudentProfile;
 use App\Models\User;
 use App\Services\CurrencyCalculator;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+use Laravel\Socialite\Contracts\Provider;
+use Laravel\Socialite\Facades\Socialite;
 use Tests\TestCase;
 
 class FinanceWorkflowTest extends TestCase
@@ -16,36 +21,80 @@ class FinanceWorkflowTest extends TestCase
     public function test_landing_and_authentication_pages_render(): void
     {
         $this->get(route('home'))->assertOk()->assertSee('Your next chapter.')->assertSee('data-theme-toggle');
-        $this->get(route('login'))->assertOk()->assertSee('Sign in securely')->assertSee('data-theme-toggle');
-        $this->get(route('register'))->assertOk()->assertSee('Create account')->assertSee('data-theme-toggle');
+        $this->get(route('login'))->assertOk()->assertSee('Welcome back')->assertSee('Remember me on this device')->assertSee('data-theme-toggle');
+        $this->get(route('register'))->assertOk()->assertSee('Create your account')->assertSee('data-theme-toggle');
+    }
+
+    public function test_google_oauth_redirect(): void
+    {
+        $response = $this->get(route('auth.google'));
+        $response->assertRedirect();
+        $this->assertStringContainsString('accounts.google.com', (string) $response->headers->get('Location'));
+    }
+
+    public function test_google_oauth_callback_creates_and_authenticates_user(): void
+    {
+        $abstractUser = \Mockery::mock(\Laravel\Socialite\Two\User::class);
+        $abstractUser->shouldReceive('getId')->andReturn('1234567890');
+        $abstractUser->shouldReceive('getEmail')->andReturn('googleuser@example.test');
+        $abstractUser->shouldReceive('getName')->andReturn('Google Explorer');
+        $abstractUser->shouldReceive('getNickname')->andReturn('explorer');
+        $abstractUser->shouldReceive('getRaw')->andReturn(['email_verified' => true]);
+
+        $provider = \Mockery::mock(Provider::class);
+        $provider->shouldReceive('user')->andReturn($abstractUser);
+
+        Socialite::shouldReceive('driver')->with('google')->andReturn($provider);
+
+        $response = $this->get(route('auth.google.callback'));
+        $response->assertRedirect(route('dashboard'));
+
+        $this->assertAuthenticated();
+        $this->assertDatabaseHas('users', [
+            'email' => 'googleuser@example.test',
+            'name' => 'Google Explorer',
+        ]);
+        $user = User::where('email', 'googleuser@example.test')->firstOrFail();
+        $this->assertNotNull($user->email_verified_at);
     }
 
     public function test_dashboard_requires_authentication_and_registration_starts_onboarding(): void
     {
         $this->get('/app')->assertRedirect(route('login'));
         $sessionIdBeforeRegistration = session()->getId();
+        $password = 'Very-secure-pass1!';
 
         $this->post(route('register.store'), [
             'name' => 'Student One',
             'email' => 'student@example.test',
-            'password' => 'very-secure-password',
-            'password_confirmation' => 'very-secure-password',
+            'password' => $password,
+            'password_confirmation' => $password,
+        ])->assertRedirect(route('register'));
+
+        $this->assertTrue(session()->has('pending_registration'));
+        $code = $this->lastVerificationCode();
+        $this->assertArrayHasKey('code_hash', session('pending_registration'));
+        $this->assertArrayNotHasKey('code', session('pending_registration'));
+
+        $this->post(route('register.verify'), [
+            'verification_code' => $code,
         ])->assertRedirect(route('dashboard'));
 
         $this->assertAuthenticated();
         $this->assertNotSame($sessionIdBeforeRegistration, session()->getId());
         $registeredUser = User::where('email', 'student@example.test')->firstOrFail();
-        $this->assertNotSame('very-secure-password', $registeredUser->password);
-        $this->assertTrue(Hash::check('very-secure-password', $registeredUser->password));
+        $this->assertNotSame($password, $registeredUser->password);
+        $this->assertTrue(Hash::check(hash('sha256', $password), $registeredUser->password));
         $this->get(route('dashboard'))->assertOk()->assertSee('Welcome to your financial map.');
         $sessionIdBeforeLogout = session()->getId();
         $this->post(route('logout'))->assertRedirect(route('home'));
         $this->assertGuest();
+        $this->get(route('dashboard'))->assertRedirect(route('login'));
         $this->assertNotSame($sessionIdBeforeLogout, session()->getId());
         $sessionIdBeforeLogin = session()->getId();
         $this->post(route('login.store'), [
             'email' => 'student@example.test',
-            'password' => 'very-secure-password',
+            'password' => $password,
         ])->assertRedirect(route('dashboard'));
         $this->assertAuthenticated();
         $this->assertNotSame($sessionIdBeforeLogin, session()->getId());
@@ -65,12 +114,455 @@ class FinanceWorkflowTest extends TestCase
             ])->assertSessionHasErrors('email');
         }
 
-        $this->post(route('login.store'), [
+        $blockedResponse = $this->post(route('login.store'), [
             'email' => 'rate-limit@example.test',
             'password' => 'wrong-password',
-        ])->assertTooManyRequests();
+        ]);
+        $blockedResponse->assertSessionHasErrors('email');
+        $this->assertStringContainsString('Too many sign-in attempts', session('errors')->first('email'));
 
         $this->assertGuest();
+    }
+
+    public function test_login_remember_me_can_restore_a_session_and_logout_revokes_the_old_cookie(): void
+    {
+        config([
+            'session.secure' => true,
+            'session.http_only' => true,
+            'session.same_site' => 'lax',
+        ]);
+
+        $user = User::factory()->create([
+            'email' => 'remember-login@example.test',
+            'password' => 'remember-test-password',
+            'remember_token' => null,
+        ]);
+        $recallerName = Auth::guard('web')->getRecallerName();
+
+        $loginResponse = $this->post(route('login.store'), [
+            'email' => $user->email,
+            'password' => 'remember-test-password',
+            'remember' => '1',
+        ]);
+
+        $loginResponse->assertRedirect(route('dashboard'))
+            ->assertCookieNotExpired($recallerName);
+
+        $rememberCookie = $loginResponse->getCookie($recallerName);
+        $this->assertNotNull($rememberCookie);
+        $this->assertTrue($rememberCookie->isSecure());
+        $this->assertTrue($rememberCookie->isHttpOnly());
+        $this->assertSame('lax', $rememberCookie->getSameSite());
+
+        $user->refresh();
+        $rotatedRememberToken = $user->getRememberToken();
+        $this->assertNotEmpty($rotatedRememberToken);
+
+        $this->flushSession();
+        Auth::forgetGuards();
+        $this->withCookie($recallerName, $rememberCookie->getValue())
+            ->get(route('dashboard'))
+            ->assertOk();
+        $this->assertAuthenticatedAs($user);
+
+        $this->post(route('logout'))
+            ->assertRedirect(route('home'))
+            ->assertCookieExpired($recallerName);
+        $this->assertGuest();
+        $this->get(route('dashboard'))->assertRedirect(route('login'));
+
+        $user->refresh();
+        $this->assertNotSame($rotatedRememberToken, $user->getRememberToken());
+
+        $this->flushSession();
+        Auth::forgetGuards();
+        $this->withCookie($recallerName, $rememberCookie->getValue())
+            ->get(route('dashboard'))
+            ->assertRedirect(route('login'));
+        $this->assertGuest();
+    }
+
+    public function test_login_without_remember_me_does_not_issue_a_persistent_cookie(): void
+    {
+        $user = User::factory()->create([
+            'email' => 'no-remember-login@example.test',
+            'password' => 'remember-test-password',
+            'remember_token' => null,
+        ]);
+        $recallerName = Auth::guard('web')->getRecallerName();
+
+        $this->post(route('login.store'), [
+            'email' => $user->email,
+            'password' => 'remember-test-password',
+        ])->assertRedirect(route('dashboard'))
+            ->assertCookieMissing($recallerName);
+
+        $user->refresh();
+        $this->assertSame('', $user->getRememberToken());
+    }
+
+    public function test_authenticated_workspace_logout_control_requires_confirmation(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('data-confirm-logout', false)
+            ->assertSee('aria-label="Sign out"', false);
+    }
+
+    public function test_registration_rejects_passwords_missing_each_required_character_group(): void
+    {
+        $invalidPasswords = [
+            'Short1!a',
+            'lowercasepass1!',
+            'UPPERCASEPASS1!',
+            'MixedCasePass!!',
+            'MixedCasePass1',
+        ];
+
+        foreach ($invalidPasswords as $index => $password) {
+            $this->post(route('register.store'), [
+                'name' => 'Student One',
+                'email' => "invalid-password-{$index}@example.test",
+                'password' => $password,
+                'password_confirmation' => $password,
+            ])->assertSessionHasErrors('password');
+        }
+    }
+
+    public function test_google_rejects_false_and_missing_email_verified_claims(): void
+    {
+        foreach ([['email_verified' => false], []] as $index => $claim) {
+            $email = "unverified-{$index}@example.test";
+            $abstractUser = \Mockery::mock(\Laravel\Socialite\Two\User::class);
+            $abstractUser->shouldReceive('getEmail')->andReturn($email);
+            $abstractUser->shouldReceive('getRaw')->andReturn($claim);
+
+            $provider = \Mockery::mock(Provider::class);
+            $provider->shouldReceive('user')->andReturn($abstractUser);
+            Socialite::shouldReceive('driver')->with('google')->andReturn($provider);
+
+            $this->get(route('auth.google.callback'))
+                ->assertRedirect(route('login'))
+                ->assertSessionHasErrors('email');
+            $this->assertGuest();
+            $this->assertDatabaseMissing('users', ['email' => $email]);
+        }
+    }
+
+    public function test_registration_otp_expires(): void
+    {
+        $this->startValidRegistration('expired@example.test');
+        $this->travel(16)->minutes();
+
+        $this->post(route('register.verify'), ['verification_code' => $this->lastVerificationCode()])
+            ->assertSessionHasErrors('verification_code');
+
+        $this->assertDatabaseMissing('users', ['email' => 'expired@example.test']);
+        $this->assertFalse(session()->has('pending_registration'));
+    }
+
+    public function test_incorrect_registration_otps_are_throttled(): void
+    {
+        $this->startValidRegistration('incorrect-code@example.test');
+
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $this->post(route('register.verify'), ['verification_code' => '000000'])
+                ->assertSessionHasErrors('verification_code');
+        }
+
+        $blockedResponse = $this->post(route('register.verify'), ['verification_code' => '000000']);
+        $blockedResponse->assertSessionHasErrors('verification_code');
+        $this->assertStringContainsString('Too many incorrect codes', session('errors')->first('verification_code'));
+        $this->assertDatabaseMissing('users', ['email' => 'incorrect-code@example.test']);
+    }
+
+    public function test_registration_resends_are_throttled(): void
+    {
+        $this->startValidRegistration('resend-limit@example.test');
+
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $this->post(route('register.resend'))->assertRedirect(route('register'));
+        }
+
+        $blockedResponse = $this->post(route('register.resend'));
+        $blockedResponse->assertSessionHasErrors('verification_code');
+        $this->assertStringContainsString('Too many code requests', session('errors')->first('verification_code'));
+    }
+
+    public function test_failed_verification_email_does_not_log_the_otp(): void
+    {
+        $otp = null;
+        Mail::shouldReceive('raw')->once()->andReturnUsing(function (string $message) use (&$otp): void {
+            preg_match('/(?<!\\d)(\\d{6})(?!\\d)/', $message, $matches);
+            $otp = $matches[1] ?? null;
+            throw new \RuntimeException('Mail transport failed');
+        });
+        Log::spy();
+
+        $this->post(route('register.store'), [
+            'name' => 'Mail Failure',
+            'email' => 'mail-failure@example.test',
+            'password' => 'Very-secure-pass1!',
+            'password_confirmation' => 'Very-secure-pass1!',
+        ])->assertRedirect(route('register'));
+
+        $this->assertNotNull($otp);
+        Log::shouldHaveReceived('warning')->with(
+            'Registration verification email could not be delivered.',
+            \Mockery::on(fn (array $context): bool => ! str_contains(json_encode($context), $otp)),
+        )->once();
+    }
+
+    public function test_login_ip_limit_allows_twenty_attempts_and_throttles_the_next_request(): void
+    {
+        for ($attempt = 0; $attempt < 20; $attempt++) {
+            $this->post(route('login.store'), [
+                'email' => "ip-limit-{$attempt}@example.test",
+                'password' => 'wrong-password',
+            ])->assertSessionHasErrors('email');
+        }
+
+        $blockedResponse = $this->post(route('login.store'), [
+            'email' => 'ip-limit-final@example.test',
+            'password' => 'wrong-password',
+        ]);
+        $blockedResponse->assertSessionHasErrors('email');
+        $this->assertStringContainsString('Too many sign-in attempts', session('errors')->first('email'));
+    }
+
+    public function test_session_encryption_is_enabled(): void
+    {
+        $this->assertTrue((bool) config('session.encrypt'));
+    }
+
+    public function test_dashboard_resilience_snapshot_keeps_foreign_tuition_separate_and_explains_the_projection(): void
+    {
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'CAD',
+            'monthly_budget' => '2000.00',
+            'monthly_income' => '3500.00',
+        ]);
+        $user->transactions()->create([
+            'kind' => 'expense',
+            'category' => 'Housing',
+            'description' => 'Current month rent',
+            'amount' => '1500.00',
+            'currency' => 'CAD',
+            'occurred_on' => today(),
+            'is_simulated' => false,
+        ]);
+        $user->transactions()->create([
+            'kind' => 'expense',
+            'category' => 'Books',
+            'description' => 'Foreign currency books',
+            'amount' => '100.00',
+            'currency' => 'EUR',
+            'occurred_on' => today(),
+            'is_simulated' => false,
+        ]);
+        $user->tuitionPlans()->create([
+            'title' => 'Overseas tuition',
+            'amount' => '12000.00',
+            'saved_amount' => '2000.00',
+            'currency' => 'USD',
+            'due_date' => today()->addDays(120),
+            'installments' => 4,
+        ]);
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('Cross-border financial resilience')
+            ->assertSee('Study destination: Canada')
+            ->assertSee('Home currency: CAD')
+            ->assertSee('Outstanding: USD')
+            ->assertSee('10000.00')
+            ->assertSee('3420.50')
+            ->assertSee('FX +10% illustration')
+            ->assertSee('Atlas demonstration rate table; not a live market quote')
+            ->assertSee('First projected financial shortfall: tuition contribution gap in month 1.')
+            ->assertSee('Monthly budget − current-month recorded expenses')
+            ->assertSee('Current-month recorded home-currency expenses repeat as the monthly spending baseline');
+    }
+
+    public function test_dashboard_flight_plan_compares_supported_stresses_and_shows_only_owned_context(): void
+    {
+        $this->travelTo(today()->startOfDay());
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '2000.00',
+            'monthly_income' => '1000.00',
+        ]);
+        $user->transactions()->createMany([
+            [
+                'kind' => 'expense',
+                'category' => 'Housing',
+                'description' => 'Current rent',
+                'amount' => '400.00',
+                'currency' => 'USD',
+                'occurred_on' => today(),
+                'is_simulated' => false,
+            ],
+            [
+                'kind' => 'expense',
+                'category' => 'Food',
+                'description' => 'Groceries',
+                'amount' => '400.00',
+                'currency' => 'USD',
+                'occurred_on' => today(),
+                'is_simulated' => false,
+            ],
+        ]);
+        $user->tuitionPlans()->create([
+            'title' => 'Winter tuition',
+            'amount' => '6000.00',
+            'saved_amount' => '1000.00',
+            'currency' => 'USD',
+            'due_date' => today()->addDays(120),
+            'installments' => 4,
+        ]);
+        $user->savingsGoals()->create([
+            'title' => 'Textbook fund',
+            'target_amount' => '1000.00',
+            'current_amount' => '250.00',
+            'currency' => 'USD',
+            'target_date' => today()->addDays(90),
+        ]);
+        $user->budgets()->createMany([
+            [
+                'category' => 'Housing',
+                'amount' => '450.00',
+                'currency' => 'USD',
+                'period_start' => today()->startOfMonth(),
+                'period_end' => today()->endOfMonth(),
+            ],
+            [
+                'category' => 'Food',
+                'amount' => '350.00',
+                'currency' => 'USD',
+                'period_start' => today()->startOfMonth(),
+                'period_end' => today()->endOfMonth(),
+            ],
+        ]);
+        $user->fundingOpportunities()->create([
+            'title' => 'University award',
+            'provider' => 'Student support office',
+            'potential_amount' => '10000.00',
+            'currency' => 'USD',
+            'deadline' => today()->addDays(30),
+            'status' => 'awarded',
+        ]);
+        $other = User::factory()->create();
+        $other->savingsGoals()->create([
+            'title' => 'Private other-user goal',
+            'target_amount' => '9000.00',
+            'current_amount' => '0.00',
+            'currency' => 'USD',
+        ]);
+        $other->fundingOpportunities()->create([
+            'title' => 'Private other-user award',
+            'provider' => 'Other account',
+            'potential_amount' => '8000.00',
+            'currency' => 'USD',
+            'deadline' => today()->addDays(20),
+        ]);
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('Student Financial Flight Plan')
+            ->assertSee('As of '.today()->toDateString())
+            ->assertSee('across 4 monthly periods')
+            ->assertSee('across 18 weekly periods')
+            ->assertSee('Saved expected monthly income: USD 1000.00 (already included in the monthly budget assumption).')
+            ->assertSee('Housing: USD 400.00 recorded against USD 450.00')
+            ->assertSee('Food: USD 400.00 recorded against USD 350.00')
+            ->assertSee('Textbook fund')
+            ->assertSee('USD 750.00 remaining')
+            ->assertSee('University award')
+            ->assertSee('Potential value: USD 10000.00. Not counted as confirmed funding.')
+            ->assertSee('Tuition shortfall: USD 200.00 · change Baseline.')
+            ->assertSee('Tuition shortfall: USD 360.00 · change +160.00.')
+            ->assertSee('Tuition shortfall: USD 1200.00 · change +1000.00.')
+            ->assertSee('Current recorded spending leaves 1200.00 USD before tuition saving, against a scheduled 1250.00 USD per month. The difference is 50.00 USD per month;')
+            ->assertSee('Discuss this flight plan with Atlas')
+            ->assertDontSee('Private other-user goal')
+            ->assertDontSee('Private other-user award')
+            ->assertDontSee('8000.00 USD');
+
+        $this->assertDatabaseCount('tuition_plans', 1);
+        $this->assertDatabaseCount('savings_goals', 2);
+        $this->assertDatabaseCount('budgets', 2);
+    }
+
+    public function test_dashboard_flight_plan_omits_unavailable_rent_stress_without_inventing_rent(): void
+    {
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'USD',
+            'monthly_budget' => '1800.00',
+            'monthly_income' => '500.00',
+        ]);
+        $user->transactions()->create([
+            'kind' => 'expense',
+            'category' => 'Food',
+            'description' => 'Groceries only',
+            'amount' => '500.00',
+            'currency' => 'USD',
+            'occurred_on' => today(),
+            'is_simulated' => false,
+        ]);
+        $user->tuitionPlans()->create([
+            'title' => 'Tuition plan without rent data',
+            'amount' => '3000.00',
+            'saved_amount' => '500.00',
+            'currency' => 'USD',
+            'due_date' => today()->addDays(120),
+            'installments' => 2,
+        ]);
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('No current-month home-currency Rent or Housing expense is recorded, so a rent-increase stress scenario is not calculated.')
+            ->assertSee('Income delayed 1 month')
+            ->assertDontSee('Rent +10%');
+    }
+
+    public function test_dashboard_shows_insufficient_data_and_never_reads_another_users_readiness_records(): void
+    {
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Canada',
+            'home_currency' => 'CAD',
+            'monthly_budget' => '1800.00',
+            'monthly_income' => '0.00',
+        ]);
+        $other = User::factory()->create();
+        $other->tuitionPlans()->create([
+            'title' => 'Private other-user tuition',
+            'amount' => '9000.00',
+            'saved_amount' => '1000.00',
+            'currency' => 'USD',
+            'due_date' => today()->addDays(90),
+            'installments' => 3,
+        ]);
+
+        $this->actingAs($user)->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('Insufficient data for a baseline forecast.')
+            ->assertSee('No current-month expense records in the home currency')
+            ->assertSee('No tuition plans are recorded.')
+            ->assertDontSee('Private other-user tuition')
+            ->assertDontSee('9000.00 USD');
     }
 
     public function test_first_time_dashboard_requires_currency_choice_and_displays_currency_names_in_help(): void
@@ -662,5 +1154,25 @@ class FinanceWorkflowTest extends TestCase
             ->assertJsonPath('budget_currency', 'EUR')
             ->assertJsonPath('budget_input_currency', 'CNY')
             ->assertJsonPath('forecast_assumptions.budget_input_conversion.rate', $expectedBudget['rate']);
+    }
+
+    private function startValidRegistration(string $email): void
+    {
+        $password = 'Very-secure-pass1!';
+
+        $this->post(route('register.store'), [
+            'name' => 'OTP Test User',
+            'email' => $email,
+            'password' => $password,
+            'password_confirmation' => $password,
+        ])->assertRedirect(route('register'));
+    }
+
+    private function lastVerificationCode(): string
+    {
+        $message = Mail::mailer('array')->getSymfonyTransport()->messages()->last();
+        preg_match('/(?<!\\d)(\\d{6})(?!\\d)/', $message->getOriginalMessage()->getTextBody(), $matches);
+
+        return $matches[1] ?? '';
     }
 }
