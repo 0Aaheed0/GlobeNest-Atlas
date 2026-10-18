@@ -165,6 +165,7 @@ Deploy the Laravel application to a PHP-capable host with managed MySQL; a stati
 
 ## Competition materials
 
+- [Technical documentation: architecture, algorithms, AI-agent design, security and verification](docs/TECHNICAL-DOCUMENTATION.md)
 - [System architecture and calculation methodology](docs/ARCHITECTURE.md)
 - [Security self-assessment and residual risks](docs/SECURITY.md)
 - [Under-10-minute demo and evidence checklist](docs/DEMO.md)
