@@ -1205,11 +1205,84 @@ class AgentToolRegistry
             'expires_at' => now()->addMinutes(15),
         ]);
 
+        // Record structured workflow intent so the next conversational turn can
+        // tell the model exactly what has been staged, which fields are already
+        // supplied, and that explicit approval is still required.  This prevents
+        // the model from re-asking for fields already present or silently
+        // attempting a second write in the same turn.
+        $this->writePendingIntentContext($conversation, $name, $data);
+
         return [
             'confirmation_required' => true,
             'pending_action' => ['id' => $pending->id, 'name' => $name, 'arguments' => $data, 'before_state' => $beforeState],
             'message' => 'This change has not been saved. Ask the user to review it and confirm explicitly.',
         ];
+    }
+
+    /**
+     * Derive the record type label from a tool name.
+     * e.g. 'create_budget' → 'budget', 'delete_tuition_plan' → 'tuition_plan'
+     */
+    private function recordTypeFromToolName(string $toolName): string
+    {
+        foreach (['create_', 'update_', 'delete_'] as $prefix) {
+            if (str_starts_with($toolName, $prefix)) {
+                return mb_substr($toolName, mb_strlen($prefix));
+            }
+        }
+
+        return $toolName;
+    }
+
+    /**
+     * Derive the CRUD operation from a tool name.
+     * Returns 'create', 'update', or 'delete'.
+     */
+    private function operationFromToolName(string $toolName): string
+    {
+        if (str_starts_with($toolName, 'create_') || $toolName === 'save_plan') {
+            return 'create';
+        }
+
+        if (str_starts_with($toolName, 'update_')) {
+            return 'update';
+        }
+
+        if (str_starts_with($toolName, 'delete_')) {
+            return 'delete';
+        }
+
+        return 'create';
+    }
+
+    /**
+     * Write structured pending-intent metadata to the conversation's task_context.
+     *
+     * This records that a consequential action has been staged and is awaiting
+     * explicit user approval, along with the fields that have already been
+     * supplied.  The model receives this via the system-prompt note on the next
+     * turn, which prevents it from re-asking for already-supplied fields or
+     * treating the pending stage as confirmed.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function writePendingIntentContext(AgentConversation $conversation, string $toolName, array $data): void
+    {
+        $existing = is_array($conversation->task_context) ? $conversation->task_context : [];
+
+        // Strip internal-only fields that must not appear as supplied values.
+        $idFields = ['goal_id', 'tuition_plan_id', 'budget_id'];
+        $supplied = array_diff_key($data, array_flip($idFields));
+
+        $existing['pending_intent'] = [
+            'operation' => $this->operationFromToolName($toolName),
+            'record_type' => $this->recordTypeFromToolName($toolName),
+            'tool_name' => $toolName,
+            'supplied_fields' => $supplied,
+            'missing_fields' => [],
+        ];
+
+        $conversation->update(['task_context' => $existing]);
     }
 
     private function confirmAndSave(User $user, AgentConversation $conversation, AgentPendingAction $pending, callable $save): array

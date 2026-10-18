@@ -171,7 +171,8 @@ class AgentController extends Controller
             'id' => $saved['id'] ?? null,
             'title' => $saved['title'] ?? null,
             'category' => $saved['category'] ?? null,
-            'amount' => $saved['amount'] ?? null,
+            // Normalise amount: savings goals use target_amount; other records use amount.
+            'amount' => $saved['amount'] ?? $saved['target_amount'] ?? null,
             'currency' => $saved['currency'] ?? null,
             'deleted' => ($saved['deleted'] ?? false) ? true : null,
         ], fn ($v) => $v !== null);

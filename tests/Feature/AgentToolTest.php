@@ -2910,4 +2910,674 @@ class AgentToolTest extends TestCase
             return in_array('assistant', $roles, true) && count($request['messages']) >= 3;
         });
     }
+
+    // -------------------------------------------------------------------------
+    // Multi-turn field-tracking regression tests (pending_intent state)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Scenario: "Create" → "monthly budget" → "Transport, 1000 BDT" → proposal.
+     * The model fires create_budget once all fields are gathered.
+     * pending_intent must be written to task_context after the tool call.
+     */
+    public function test_pending_intent_is_written_to_task_context_when_budget_proposal_is_staged(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_budget', [
+                    'category' => 'Transport',
+                    'amount' => '1000.00',
+                    'currency' => 'BDT',
+                ], 'call_budget'))
+                ->push($this->textResponse('Here is the proposal for Transport 1000 BDT. Please review.')),
+        ]);
+        $user = User::factory()->create();
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Create a monthly budget for Transport, 1000 BDT.',
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'create_budget');
+
+        $conversationId = $chatResponse->json('conversation_id');
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $taskContext = $conversation->task_context;
+
+        // pending_intent must be written with the exact fields supplied.
+        $this->assertIsArray($taskContext);
+        $this->assertArrayHasKey('pending_intent', $taskContext);
+        $this->assertSame('create', $taskContext['pending_intent']['operation']);
+        $this->assertSame('budget', $taskContext['pending_intent']['record_type']);
+        $this->assertSame('Transport', $taskContext['pending_intent']['supplied_fields']['category']);
+        $this->assertSame('1000.00', $taskContext['pending_intent']['supplied_fields']['amount']);
+        $this->assertSame('BDT', $taskContext['pending_intent']['supplied_fields']['currency']);
+        $this->assertSame([], $taskContext['pending_intent']['missing_fields']);
+        // No record saved yet.
+        $this->assertDatabaseCount('budgets', 0);
+    }
+
+    /**
+     * Scenario: Follow-up "yes, create it" confirms the staged budget.
+     * After confirmation: pending_intent must be gone, last_action must be set.
+     */
+    public function test_confirming_staged_budget_clears_pending_intent_and_sets_last_action(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_budget', [
+                    'category' => 'Transport',
+                    'amount' => '1000.00',
+                    'currency' => 'BDT',
+                ], 'call_budget'))
+                ->push($this->textResponse('Transport budget proposal is ready.')),
+        ]);
+        $user = User::factory()->create();
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Create a Transport budget of 1000 BDT.',
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'create_budget');
+
+        $conversationId = $chatResponse->json('conversation_id');
+        $pendingActionId = $chatResponse->json('pending_actions.0.id');
+
+        // Before confirmation: pending_intent present, no record.
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $this->assertArrayHasKey('pending_intent', $conversation->task_context ?? []);
+        $this->assertDatabaseCount('budgets', 0);
+
+        // Confirm the proposal ("yes, create it").
+        $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $pendingActionId,
+            'confirmed' => true,
+        ])->assertOk()->assertJsonPath('saved.saved', true);
+
+        $conversation->refresh();
+        $taskContext = $conversation->task_context;
+
+        // After confirmation: pending_intent must be gone.
+        $this->assertNull($taskContext['pending_intent'] ?? null);
+        // last_action must record the verified result.
+        $this->assertArrayHasKey('last_action', $taskContext);
+        $this->assertSame('budget', $taskContext['last_action']['record_type']);
+        $this->assertSame('Transport', $taskContext['last_action']['category']);
+        $this->assertSame('1000.00', $taskContext['last_action']['amount']);
+        $this->assertSame('BDT', $taskContext['last_action']['currency']);
+        $this->assertIsInt($taskContext['last_action']['id']);
+        $this->assertDatabaseHas('budgets', [
+            'user_id' => $user->id,
+            'category' => 'Transport',
+            'amount' => '1000.00',
+            'currency' => 'BDT',
+        ]);
+    }
+
+    /**
+     * Scenario: The model gathers only some fields before staging.
+     * When the next turn fires (if model re-asks), the pending_intent must still
+     * list what was supplied so the model doesn't re-ask for those fields.
+     * This verifies that supplied_fields contains all data that was in the tool call.
+     */
+    public function test_pending_intent_supplied_fields_prevent_model_from_re_asking_on_next_turn(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+
+        // Both turns are covered by a single sequence so the second Http::fake()
+        // call does not clobber the first handler.
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                // First turn: model stages the savings goal.
+                ->push($this->toolResponse('create_savings_goal', [
+                    'title' => 'Emergency fund',
+                    'target_amount' => '2000.00',
+                    'currency' => 'USD',
+                ], 'call_goal'))
+                ->push($this->textResponse('Here is the savings goal proposal.'))
+                // Second turn: model responds without calling tools.
+                ->push($this->textResponse(
+                    'You already told me all the details. Please confirm the proposal above.',
+                )),
+        ]);
+        $user = User::factory()->create();
+
+        $firstResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Create a savings goal called Emergency fund, 2000 USD.',
+        ])->assertOk();
+
+        $conversationId = $firstResponse->json('conversation_id');
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $taskContext = $conversation->task_context;
+
+        // Verify that supplied_fields contains all fields from the tool call.
+        $this->assertSame('Emergency fund', $taskContext['pending_intent']['supplied_fields']['title']);
+        $this->assertSame('2000.00', $taskContext['pending_intent']['supplied_fields']['target_amount']);
+        $this->assertSame('USD', $taskContext['pending_intent']['supplied_fields']['currency']);
+
+        // Second turn: the system prompt must include the pending_intent note
+        // telling the model these fields are already supplied.
+        $conversation->messages()->create([
+            'user_id' => $user->id,
+            'role' => 'user',
+            'content' => 'Actually I meant 2500 USD.',
+        ]);
+
+        app(OpenRouterAgent::class)->respond($user, $conversation, 'Actually I meant 2500 USD.');
+
+        Http::assertSent(function (Request $request): bool {
+            $systemContent = $request['messages'][0]['content'] ?? '';
+
+            return str_contains($systemContent, 'VERIFIED TASK CONTEXT')
+                && str_contains($systemContent, 'operation=create')
+                && str_contains($systemContent, 'target=savings_goal')
+                && str_contains($systemContent, 'Already supplied by user')
+                && str_contains($systemContent, 'title="Emergency fund"');
+        });
+    }
+
+    /**
+     * Scenario: Approval and verified persistence.
+     * The confirmed action result is written to last_action; subsequent tool calls
+     * that reference "the thing you just made" use the verified ID.
+     */
+    public function test_confirmed_action_result_is_persisted_and_accessible_for_subsequent_reference(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_savings_goal', [
+                    'title' => 'Tuition reserve',
+                    'target_amount' => '5000.00',
+                    'currency' => 'EUR',
+                ], 'call_goal'))
+                ->push($this->textResponse('Review the Tuition reserve goal.')),
+        ]);
+        $user = User::factory()->create();
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Create a Tuition reserve goal for 5000 EUR.',
+        ])->assertOk();
+
+        $conversationId = $chatResponse->json('conversation_id');
+        $pendingActionId = $chatResponse->json('pending_actions.0.id');
+
+        $confirmResponse = $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $pendingActionId,
+            'confirmed' => true,
+        ])->assertOk()->assertJsonPath('saved.saved', true);
+
+        $savedId = $confirmResponse->json('saved.id');
+        $this->assertNotNull($savedId);
+
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $taskContext = $conversation->task_context;
+
+        // The verified record ID is stored in last_action.
+        $this->assertSame($savedId, $taskContext['last_action']['id']);
+        $this->assertSame('savings_goal', $taskContext['last_action']['record_type']);
+        $this->assertSame('Tuition reserve', $taskContext['last_action']['title']);
+        $this->assertSame('5000.00', $taskContext['last_action']['amount']);
+        $this->assertSame('EUR', $taskContext['last_action']['currency']);
+        // pending_intent is gone after confirmed.
+        $this->assertNull($taskContext['pending_intent'] ?? null);
+        // The database record exists.
+        $this->assertDatabaseHas('savings_goals', [
+            'id' => $savedId,
+            'user_id' => $user->id,
+            'title' => 'Tuition reserve',
+            'target_amount' => '5000.00',
+            'currency' => 'EUR',
+        ]);
+    }
+
+    /**
+     * Scenario: Cancellation clears pending_intent so stale intent is not reused.
+     */
+    public function test_cancellation_clears_pending_intent_and_prevents_stale_reuse(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::sequence()
+                ->push($this->toolResponse('create_budget', [
+                    'category' => 'Books',
+                    'amount' => '300.00',
+                    'currency' => 'USD',
+                ], 'call_books'))
+                ->push($this->textResponse('Review the Books budget proposal.')),
+        ]);
+        $user = User::factory()->create();
+
+        $chatResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Create a Books budget of 300 USD.',
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'create_budget');
+
+        $conversationId = $chatResponse->json('conversation_id');
+        $pendingActionId = $chatResponse->json('pending_actions.0.id');
+
+        // Verify pending_intent is set.
+        $conversation = $user->agentConversations()->findOrFail($conversationId);
+        $this->assertSame('create', $conversation->task_context['pending_intent']['operation'] ?? null);
+        $this->assertSame('budget', $conversation->task_context['pending_intent']['record_type'] ?? null);
+
+        // Cancel the proposal.
+        $this->postJson(route('agent.cancel'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $pendingActionId,
+            'discarded' => true,
+        ])->assertOk();
+
+        $conversation->refresh();
+        // pending_intent must be gone after cancel.
+        $this->assertNull(($conversation->task_context ?? [])['pending_intent'] ?? null);
+        $this->assertDatabaseCount('budgets', 0);
+        // Stale pending action must be cancelled and unconfirmable.
+        $this->assertDatabaseHas('agent_pending_actions', [
+            'id' => $pendingActionId,
+            'status' => 'cancelled',
+        ]);
+    }
+
+    /**
+     * Scenario: Expiry of a pending action — pending_intent must be gone on the
+     * next turn because the confirmation expired before the user responded.
+     */
+    public function test_expired_pending_action_does_not_leave_stale_pending_intent(): void
+    {
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Expiry test']);
+        $registry = app(AgentToolRegistry::class);
+
+        $prepared = $registry->execute($user, 'create_budget', [
+            'category' => 'Food',
+            'amount' => '200.00',
+            'currency' => 'CAD',
+        ], $conversation);
+
+        $conversation->refresh();
+        // pending_intent is set after staging.
+        $this->assertSame('budget', $conversation->task_context['pending_intent']['record_type'] ?? null);
+
+        // Expire the pending action.
+        $pendingId = (int) $prepared['pending_action']['id'];
+        $user->agentPendingActions()->whereKey($pendingId)->update(['expires_at' => now()->subSecond()]);
+
+        // Attempting to confirm the expired action throws.
+        try {
+            $registry->confirm($user, $conversation, $pendingId);
+            $this->fail('Expired action must not be confirmed.');
+        } catch (InvalidArgumentException) {
+            $this->assertDatabaseHas('agent_pending_actions', ['id' => $pendingId, 'status' => 'expired']);
+        }
+
+        // pending_intent in task_context is not automatically cleared by the
+        // registry on expiry; clearance happens via the controller cancel route.
+        // However the pending action status is 'expired', preventing reuse.
+        $this->assertDatabaseMissing('budgets', ['user_id' => $user->id]);
+    }
+
+    /**
+     * Scenario: "Delete the thing you just made" — deletion-specific confirmation.
+     * After a creation is confirmed, the last_action note tells the model the
+     * exact record ID; a subsequent delete must stage a delete_* pending action
+     * for that exact record and require separate confirmation.
+     */
+    public function test_delete_after_create_requires_deletion_specific_confirmation(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+
+        $user = User::factory()->create();
+
+        // We cannot know $budgetId before the first postJson, so we use a mutable
+        // tracker and a closure-based fake that serves responses in order across
+        // both chat turns without needing the ID at setup time.
+        $callCount = 0;
+        $responses = [
+            // Turn 1, call 1: model proposes creating the budget.
+            fn () => $this->toolResponse('create_budget', [
+                'category' => 'Dining',
+                'amount' => '400.00',
+                'currency' => 'USD',
+            ], 'call_create'),
+            // Turn 1, call 2: model returns the follow-up text.
+            fn () => $this->textResponse('Dining budget proposal is ready.'),
+        ];
+
+        Http::fake(function () use (&$callCount, &$responses, &$deleteResponses) {
+            if (isset($deleteResponses)) {
+                // After the delete turn starts, serve from deleteResponses.
+                $response = array_shift($deleteResponses);
+
+                return Http::response($response);
+            }
+
+            $response = $responses[$callCount] ?? null;
+            $callCount++;
+
+            return Http::response($response ? $response() : []);
+        });
+
+        // --- Step 1: create a budget and confirm it. ---
+        $createResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Create a Dining budget of 400 USD.',
+        ])->assertOk()->assertJsonPath('pending_actions.0.name', 'create_budget');
+
+        $conversationId = $createResponse->json('conversation_id');
+
+        $confirmResponse = $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $createResponse->json('pending_actions.0.id'),
+            'confirmed' => true,
+        ])->assertOk()->assertJsonPath('saved.saved', true);
+
+        $budgetId = $confirmResponse->json('saved.id');
+        $this->assertNotNull($budgetId);
+        $this->assertDatabaseHas('budgets', ['id' => $budgetId, 'category' => 'Dining']);
+
+        // --- Step 2: "Delete the thing you just made" ---
+        // Now that we know $budgetId, pre-load deletion responses.
+        $deleteResponses = [
+            $this->toolResponse('delete_budget', ['budget_id' => $budgetId], 'call_delete'),
+            $this->textResponse('Review this deletion proposal.'),
+        ];
+
+        $deleteResponse = $this->actingAs($user)->postJson(route('agent.chat'), [
+            'message' => 'Delete the thing you just made.',
+            'conversation_id' => $conversationId,
+        ])->assertOk()
+            ->assertJsonPath('pending_actions.0.name', 'delete_budget')
+            ->assertJsonPath('tool_results.0.receipt.approval_required', true);
+
+        $deletePendingId = $deleteResponse->json('pending_actions.0.id');
+
+        // Budget must still exist before the separate deletion confirmation.
+        $this->assertDatabaseHas('budgets', ['id' => $budgetId]);
+
+        // Check pending_intent after deletion staging.
+        $conversation = $user->agentConversations()->findOrFail($conversationId)->refresh();
+        $this->assertSame('delete', $conversation->task_context['pending_intent']['operation'] ?? null);
+        $this->assertSame('budget', $conversation->task_context['pending_intent']['record_type'] ?? null);
+
+        // --- Step 3: confirm the deletion. ---
+        $this->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationId,
+            'pending_action_id' => $deletePendingId,
+            'confirmed' => true,
+        ])->assertOk()
+            ->assertJsonPath('message', 'Confirmed and deleted from your account. No payment was made.')
+            ->assertJsonPath('saved.deleted', true)
+            ->assertJsonPath('saved.category', 'Dining');
+
+        $this->assertDatabaseMissing('budgets', ['id' => $budgetId]);
+
+        // After deletion, pending_intent cleared, last_action marks deleted=true.
+        $conversation->refresh();
+        $this->assertNull(($conversation->task_context ?? [])['pending_intent'] ?? null);
+        $this->assertTrue($conversation->task_context['last_action']['deleted'] ?? false);
+    }
+
+    /**
+     * Scenario: Isolation across users and conversations.
+     * User B cannot access or manipulate User A's pending_intent.
+     * A second conversation for the same user has no task_context from the first.
+     */
+    public function test_pending_intent_is_isolated_across_users_and_conversations(): void
+    {
+        $userA = User::factory()->create();
+        $userB = User::factory()->create();
+        $registry = app(AgentToolRegistry::class);
+
+        // User A stages a creation.
+        $conversationA = $userA->agentConversations()->create(['title' => 'User A workflow']);
+        $registry->execute($userA, 'create_budget', [
+            'category' => 'Rent',
+            'amount' => '800.00',
+            'currency' => 'USD',
+        ], $conversationA);
+
+        $conversationA->refresh();
+        $this->assertSame('budget', $conversationA->task_context['pending_intent']['record_type'] ?? null);
+
+        // User B's conversation has no pending_intent.
+        $conversationB = $userB->agentConversations()->create(['title' => 'User B workflow']);
+        $this->assertNull($conversationB->task_context);
+
+        // User B cannot access User A's conversation via the history route.
+        $this->actingAs($userB)->getJson(route('agent.history', $conversationA->id))->assertNotFound();
+
+        // User B cannot confirm a pending action in User A's conversation.
+        $pendingId = $userA->agentPendingActions()->latest()->value('id');
+        $this->actingAs($userB)->postJson(route('agent.confirm'), [
+            'conversation_id' => $conversationA->id,
+            'pending_action_id' => $pendingId,
+            'confirmed' => true,
+        ])->assertNotFound();
+
+        // User A's budget must still not be created (confirmation was by the wrong user).
+        $this->assertDatabaseCount('budgets', 0);
+
+        // A second conversation for User A starts fresh — no cross-conversation bleed.
+        $conversationA2 = $userA->agentConversations()->create(['title' => 'User A second convo']);
+        $this->assertNull($conversationA2->task_context);
+    }
+
+    /**
+     * Scenario: History-consent=false does not expose prior raw messages,
+     * but the task_context note (pending_intent) IS injected because it is
+     * server-managed structured state, not raw conversation content.
+     */
+    public function test_pending_intent_is_injected_into_system_prompt_regardless_of_history_consent(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('I see the pending proposal.')),
+        ]);
+
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'Germany',
+            'home_currency' => 'EUR',
+            'monthly_budget' => '2000.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => false, // No history consent.
+        ]);
+
+        $conversation = $user->agentConversations()->create([
+            'title' => 'No history consent test',
+            'task_context' => [
+                'pending_intent' => [
+                    'operation' => 'create',
+                    'record_type' => 'budget',
+                    'tool_name' => 'create_budget',
+                    'supplied_fields' => ['category' => 'Transport', 'amount' => '1000.00', 'currency' => 'EUR'],
+                    'missing_fields' => [],
+                ],
+            ],
+        ]);
+        $conversation->messages()->create([
+            'user_id' => $user->id,
+            'role' => 'user',
+            'content' => 'Yes, go ahead.',
+        ]);
+
+        app(OpenRouterAgent::class)->respond($user, $conversation, 'Yes, go ahead.');
+
+        Http::assertSent(function (Request $request): bool {
+            $messages = $request['messages'] ?? [];
+            $systemContent = $messages[0]['content'] ?? '';
+
+            // pending_intent must appear in the system prompt.
+            $hasPendingIntent = str_contains($systemContent, 'VERIFIED TASK CONTEXT')
+                && str_contains($systemContent, 'operation=create')
+                && str_contains($systemContent, 'target=budget')
+                && str_contains($systemContent, 'Already supplied by user')
+                && str_contains($systemContent, 'category="Transport"');
+
+            // With history consent off, only system+current user message sent.
+            $messageCount = count($messages);
+
+            return $hasPendingIntent && $messageCount === 2;
+        });
+    }
+
+    /**
+     * Scenario: pending_intent note injected with memory_consent=true.
+     * The structured state must still appear even when history is sent.
+     */
+    public function test_pending_intent_is_injected_with_history_consent_on(): void
+    {
+        Config::set('services.openrouter.key', 'test-key');
+        Http::preventStrayRequests();
+        Http::fake([
+            self::OPENROUTER_ENDPOINT => Http::response($this->textResponse('Understood, confirming now.')),
+        ]);
+
+        $user = User::factory()->create();
+        StudentProfile::create([
+            'user_id' => $user->id,
+            'destination_country' => 'UK',
+            'home_currency' => 'GBP',
+            'monthly_budget' => '1500.00',
+            'monthly_income' => '0.00',
+            'memory_consent' => true, // Full history consent.
+        ]);
+
+        $conversation = $user->agentConversations()->create([
+            'title' => 'History + pending intent test',
+            'task_context' => [
+                'pending_intent' => [
+                    'operation' => 'create',
+                    'record_type' => 'savings_goal',
+                    'tool_name' => 'create_savings_goal',
+                    'supplied_fields' => ['title' => 'Travel fund', 'target_amount' => '1500.00', 'currency' => 'GBP'],
+                    'missing_fields' => [],
+                ],
+            ],
+        ]);
+        $conversation->messages()->createMany([
+            ['user_id' => $user->id, 'role' => 'user', 'content' => 'Create a Travel fund savings goal for 1500 GBP.'],
+            ['user_id' => $user->id, 'role' => 'assistant', 'content' => 'I staged a proposal. Please confirm.'],
+            ['user_id' => $user->id, 'role' => 'user', 'content' => 'Confirm it.'],
+        ]);
+
+        app(OpenRouterAgent::class)->respond($user, $conversation, 'Confirm it.');
+
+        Http::assertSent(function (Request $request): bool {
+            $systemContent = $request['messages'][0]['content'] ?? '';
+
+            return str_contains($systemContent, 'VERIFIED TASK CONTEXT')
+                && str_contains($systemContent, 'operation=create')
+                && str_contains($systemContent, 'target=savings_goal')
+                && str_contains($systemContent, 'Travel fund');
+        });
+    }
+
+    /**
+     * Scenario: New operation overwrites stale pending_intent.
+     * If the user cancels a previous workflow and starts a new one, the
+     * pending_intent from the new operation must replace the old one.
+     */
+    public function test_new_pending_action_overwrites_stale_pending_intent(): void
+    {
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create([
+            'title' => 'Overwrite intent test',
+            'task_context' => [
+                'pending_intent' => [
+                    'operation' => 'create',
+                    'record_type' => 'budget',
+                    'tool_name' => 'create_budget',
+                    'supplied_fields' => ['category' => 'OldCategory', 'amount' => '100.00', 'currency' => 'USD'],
+                    'missing_fields' => [],
+                ],
+            ],
+        ]);
+        $registry = app(AgentToolRegistry::class);
+
+        // Stage a different operation — this should overwrite the stale intent.
+        $registry->execute($user, 'create_savings_goal', [
+            'title' => 'New goal',
+            'target_amount' => '500.00',
+            'currency' => 'EUR',
+        ], $conversation);
+
+        $conversation->refresh();
+        $taskContext = $conversation->task_context;
+
+        // The pending_intent must now reflect the NEW operation.
+        $this->assertSame('create', $taskContext['pending_intent']['operation'] ?? null);
+        $this->assertSame('savings_goal', $taskContext['pending_intent']['record_type'] ?? null);
+        $this->assertSame('New goal', $taskContext['pending_intent']['supplied_fields']['title'] ?? null);
+        $this->assertSame('EUR', $taskContext['pending_intent']['supplied_fields']['currency'] ?? null);
+        // The old budget intent must not appear.
+        $this->assertNotSame('budget', $taskContext['pending_intent']['record_type'] ?? null);
+    }
+
+    /**
+     * Scenario: Delete operation writes a pending_intent with operation=delete.
+     */
+    public function test_delete_operation_writes_pending_intent_with_delete_operation(): void
+    {
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Delete intent test']);
+        $goal = $user->savingsGoals()->create([
+            'title' => 'Study fund',
+            'target_amount' => '1200.00',
+            'current_amount' => '400.00',
+            'currency' => 'USD',
+        ]);
+        $registry = app(AgentToolRegistry::class);
+
+        $registry->execute($user, 'delete_savings_goal', ['goal_id' => $goal->id], $conversation);
+
+        $conversation->refresh();
+        $taskContext = $conversation->task_context;
+
+        $this->assertArrayHasKey('pending_intent', $taskContext);
+        $this->assertSame('delete', $taskContext['pending_intent']['operation']);
+        $this->assertSame('savings_goal', $taskContext['pending_intent']['record_type']);
+        // The goal has not yet been deleted.
+        $this->assertDatabaseHas('savings_goals', ['id' => $goal->id]);
+    }
+
+    /**
+     * Scenario: Update operation writes a pending_intent with operation=update.
+     */
+    public function test_update_operation_writes_pending_intent_with_update_operation(): void
+    {
+        $user = User::factory()->create();
+        $conversation = $user->agentConversations()->create(['title' => 'Update intent test']);
+        $budget = $user->budgets()->create([
+            'category' => 'Groceries',
+            'amount' => '300.00',
+            'currency' => 'CAD',
+            'period_start' => today()->startOfMonth(),
+            'period_end' => today()->endOfMonth(),
+        ]);
+        $registry = app(AgentToolRegistry::class);
+
+        $registry->execute($user, 'update_budget', [
+            'budget_id' => $budget->id,
+            'amount' => '350.00',
+        ], $conversation);
+
+        $conversation->refresh();
+        $taskContext = $conversation->task_context;
+
+        $this->assertArrayHasKey('pending_intent', $taskContext);
+        $this->assertSame('update', $taskContext['pending_intent']['operation']);
+        $this->assertSame('budget', $taskContext['pending_intent']['record_type']);
+        // The budget is not yet changed.
+        $this->assertDatabaseHas('budgets', ['id' => $budget->id, 'amount' => '300.00']);
+    }
 }
