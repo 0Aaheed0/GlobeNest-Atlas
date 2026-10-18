@@ -4,15 +4,6 @@ GlobeNest Atlas is a Laravel financial-planning workspace for international stud
 
 Atlas is a planning prototype, not a bank, remittance provider or regulated financial adviser. It does not connect to bank accounts or move money.
 
-## Competition materials and project documentation
-
-- [Technical documentation: architecture, algorithms, AI-agent design, security and verification](TECHNICAL-DOCUMENTATION.md)
-- [System architecture and calculation methodology](ARCHITECTURE.md)
-- [Security self-assessment and residual risks](SECURITY.md)
-- [Under-10-minute demo and evidence checklist](DEMO.md)
-- [8-slide presentation source and speaker script](PRESENTATION.md)
-- [Competition submission checklist and current evidence status](GlobeNest-Atlas-Submission-Checklist.md)
-
 ## What works
 
 - Account registration, throttled sign-in, logout, private sessions and a student profile.
