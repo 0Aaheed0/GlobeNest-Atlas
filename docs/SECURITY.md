@@ -1,6 +1,6 @@
 # Security self-assessment
 
-This is a source-level assessment of the repository, not a penetration test, security certification, privacy review or production-environment inspection. Source presence, automated tests and deployment verification are stated separately. The latest report available from the user says the suite passed on their Windows environment after the Flight Plan work; no runner output or count is included here, and the additional stale-approval regression test in this phase has not been executed.
+This is a source-level assessment of the repository, not a penetration test, security certification, privacy review or production-environment inspection. Source presence, automated tests and deployment verification are stated separately. Reported results are available for the tested revision `c44a0e2` (an ancestor of the current `main`); they are listed under Automated evidence below, they are labelled as applying to that tested revision, and they are not a claim about any later revision.
 
 ## Implemented controls (source review)
 
@@ -16,9 +16,19 @@ This is a source-level assessment of the repository, not a penetration test, sec
 
 ## Automated evidence and current verification
 
-Existing tests cover selected authentication, account isolation, financial calculations, provider failure handling, data redaction, tool validation, approval/cancellation/expiry/replay and stale-state behavior. A new regression test now covers a stale approval being marked failed and displayed as a no-change outcome. The previous suite reports are historical or user-reported and do not prove the latest code.
+Existing tests cover selected authentication, account isolation, financial calculations, provider failure handling, data redaction, tool validation, approval/cancellation/expiry/replay and stale-state behavior. A regression test covers a stale approval being marked failed and displayed as a no-change outcome.
 
-In this audit environment, `php` and `composer` are not available on `PATH`. Therefore the current PHPUnit suite, Pint, and Composer audit cannot be run here. The current browser build can be checked with `npm.cmd run build`; the npm audit endpoint has failed to respond in this environment, which is not a clean vulnerability result. Run the current focused test, full suite and Pint commands from the submission checklist in a PHP-enabled checkout. Do not count a failed registry request as dependency clearance.
+**Reported results for the tested revision `c44a0e2`** (an ancestor of the current `main`; also recorded in `docs/TECHNICAL-DOCUMENTATION.md`):
+
+- `php artisan test --compact tests/Feature/AgentToolTest.php`: **90 passed (811 assertions)**.
+- `php artisan test --compact`: **161 passed (1,343 assertions)**.
+- `vendor/bin/pint --dirty --format agent`: **passed**.
+- `npm.cmd run build`: **passed**.
+- `git diff --check`: **passed** (no trailing whitespace or conflict markers).
+
+These results apply to the tested revision `c44a0e2` only. The earlier statement that the suite could not be run because `php` and `composer` were unavailable on `PATH` described an earlier audit environment and is superseded for that revision by the results above. The PHPUnit runs use the repository test configuration (in-memory SQLite with array session/cache/mail), so they verify application logic and account isolation, not live integrations or production behavior.
+
+Dependency-audit status remains unverified: no `composer audit` or `npm audit` result for this revision is available here, and a failed registry request must not be counted as dependency clearance.
 
 ## Partial verification and accepted limitations
 
